@@ -1,0 +1,10 @@
+BioMoQA RAG Evaluation Summary
+================================================================================
+
+Total questions: 120
+Exact Match: 0.00%
+Average F1: 2.29%
+Average ROUGE-1: 40.64%
+Average ROUGE-2: 18.37%
+Average ROUGE-L: 38.98%
+Average time: 7.27s
