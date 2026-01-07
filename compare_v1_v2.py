@@ -47,8 +47,9 @@ def calculate_metrics(results_path):
         }
     }
 
-    # Calculate other metrics
-    avg_time = df['pipeline_time'].mean()
+    # Calculate other metrics (handle different column names)
+    time_col = 'pipeline_time' if 'pipeline_time' in df.columns else 'pipeline_time_seconds'
+    avg_time = df[time_col].mean()
     avg_answer_len = df['model_answer'].str.len().mean()
 
     return {
