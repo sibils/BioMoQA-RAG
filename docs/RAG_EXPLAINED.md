@@ -1,6 +1,6 @@
 # How RAG Works in BioMoQA - Deep Dive
 
-## What is RAG? (Yes, this is real RAG!)
+## What is RAG?
 
 **RAG = Retrieval-Augmented Generation**
 
