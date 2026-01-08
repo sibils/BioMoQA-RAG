@@ -31,7 +31,8 @@ def get_pipeline():
             final_n=10,
             max_tokens=384,
             truncate_abstracts=True,
-            quantization="fp8"  # FP8 quantization enabled
+            quantization="fp8",  # FP8 quantization enabled
+            gpu_memory_utilization=0.7  # Reduced from 0.8
         )
         pipeline = UltraFastRAGPipeline(config)
         print("✓ V3.1 pipeline ready")
@@ -47,11 +48,28 @@ class QuestionRequest(BaseModel):
     debug: bool = False
 
 
+class CitationDetail(BaseModel):
+    """Citation information for a single document"""
+    document_id: int
+    document_title: str
+    pmcid: str
+
+
+class AnswerSentence(BaseModel):
+    """Single sentence with citations"""
+    text: str
+    citation_ids: List[int]
+    citations: List[CitationDetail]
+
+
 class QuestionResponse(BaseModel):
+    """Ragnarok-style response with sentence-level citations"""
     question: str
-    answer: str
-    num_retrieved: int
+    answer: List[AnswerSentence]  # List of sentences with citations
+    references: List[str]  # List of all cited documents
+    response_length: int
     pipeline_time: float
+    num_retrieved: int
     pipeline_version: str
     debug_info: Optional[Dict] = None
     documents: Optional[List[Dict]] = None

@@ -214,7 +214,7 @@ class UltraFastRAGPipeline:
 
         # Step 4: Generate answer with optimizations
         t0 = time.time()
-        answer_text = self.generate_fast(question, documents)
+        parsed_answer = self.generate_fast(question, documents)
         generation_time = time.time() - t0
 
         if debug:
@@ -223,12 +223,17 @@ class UltraFastRAGPipeline:
 
         pipeline_time = time.time() - start_time
 
-        # Build response
+        # Calculate response length
+        response_length = sum(len(sent['text']) for sent in parsed_answer['answer'])
+
+        # Build response (Ragnarok-style format)
         response = {
             'question': question,
-            'answer': answer_text,
-            'num_retrieved': len(documents),
+            'answer': parsed_answer['answer'],  # List of sentences with citations
+            'references': parsed_answer['references'],  # List of cited documents
+            'response_length': response_length,
             'pipeline_time': pipeline_time,
+            'num_retrieved': len(documents),
             'pipeline_version': 'v3.1-fast',
         }
 
@@ -246,8 +251,8 @@ class UltraFastRAGPipeline:
 
         return response
 
-    def generate_fast(self, question: str, documents: List) -> str:
-        """Generate answer with fast optimizations"""
+    def generate_fast(self, question: str, documents: List) -> Dict:
+        """Generate answer with fast optimizations and parse citations"""
 
         # Build optimized context
         context_parts = []
@@ -266,7 +271,7 @@ class UltraFastRAGPipeline:
         context = "\n\n".join(context_parts)
 
         # Optimized prompt (shorter)
-        prompt = f"""Answer using context. Cite sources with [0], [1], etc.
+        prompt = f"""Answer using context. Cite sources with [0], [1], etc. at the end of each sentence.
 
 Context:
 {context}
@@ -283,6 +288,72 @@ Answer:"""
         )
 
         outputs = self.llm.generate([prompt], sampling_params)
-        answer = outputs[0].outputs[0].text.strip()
+        answer_text = outputs[0].outputs[0].text.strip()
 
-        return answer
+        # Parse answer into sentences with citations
+        parsed_answer = self._parse_answer_with_citations(answer_text, documents)
+
+        return parsed_answer
+
+    def _parse_answer_with_citations(self, answer_text: str, documents: List) -> Dict:
+        """Parse answer text into sentences with citation extraction"""
+        import re
+
+        # Split into sentences (simple split on period + space)
+        sentences = re.split(r'\.\s+', answer_text)
+
+        parsed_sentences = []
+        all_citation_ids = set()
+
+        for sentence in sentences:
+            if not sentence.strip():
+                continue
+
+            # Find citation markers like [0], [1], [0, 1], etc.
+            citation_pattern = r'\[(\d+(?:\s*,\s*\d+)*)\]'
+            citations_found = re.findall(citation_pattern, sentence)
+
+            # Extract unique citation IDs
+            citation_ids = []
+            for cite_group in citations_found:
+                ids = [int(x.strip()) for x in cite_group.split(',')]
+                citation_ids.extend(ids)
+
+            # Remove duplicates and sort
+            citation_ids = sorted(list(set(citation_ids)))
+            all_citation_ids.update(citation_ids)
+
+            # Build citation details
+            citation_details = []
+            for cid in citation_ids:
+                if cid < len(documents):
+                    doc = documents[cid]
+                    citation_details.append({
+                        'document_id': cid,
+                        'document_title': doc.title,
+                        'pmcid': f"PMC{doc.pmcid}"
+                    })
+
+            # Remove citation markers from text for clean display
+            clean_text = re.sub(citation_pattern, '', sentence).strip()
+
+            # Add period back if not present
+            if clean_text and not clean_text.endswith('.'):
+                clean_text += '.'
+
+            parsed_sentences.append({
+                'text': clean_text,
+                'citation_ids': citation_ids,
+                'citations': citation_details
+            })
+
+        # Build references list
+        references = []
+        for i, doc in enumerate(documents):
+            if i in all_citation_ids:
+                references.append(f"[{i}] PMC{doc.pmcid}: {doc.title}")
+
+        return {
+            'answer': parsed_sentences,
+            'references': references
+        }
