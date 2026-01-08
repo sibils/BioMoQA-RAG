@@ -234,7 +234,7 @@ class UltraFastRAGPipeline:
             'response_length': response_length,
             'pipeline_time': pipeline_time,
             'num_retrieved': len(documents),
-            'pipeline_version': 'v3.1-fast',
+            'pipeline_version': 'v3.2',
         }
 
         if debug:

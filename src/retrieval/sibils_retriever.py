@@ -9,6 +9,7 @@ import requests
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 import time
+from .query_parser import SIBILSQueryParser, ParsedQuery
 
 
 @dataclass
@@ -51,6 +52,8 @@ class SIBILSRetriever:
         collection: str = "pmc",
         default_n: int = 100,
         timeout: int = 30,
+        use_query_parser: bool = True,
+        use_es_query: bool = True,  # Use full Elasticsearch query with concept annotations
     ):
         """
         Initialize SIBILS retriever.
@@ -60,11 +63,21 @@ class SIBILSRetriever:
             collection: Collection to search ("pmc", "medline", "plazi", "suppdata")
             default_n: Default number of documents to retrieve
             timeout: Request timeout in seconds
+            use_query_parser: Use SIBILS query parser to enhance queries
+            use_es_query: Use Elasticsearch query (requires query parser)
         """
         self.api_url = api_url
         self.collection = collection
         self.default_n = default_n
         self.timeout = timeout
+        self.use_query_parser = use_query_parser
+        self.use_es_query = use_es_query and use_query_parser  # ES query requires parser
+
+        # Initialize query parser if enabled
+        if self.use_query_parser:
+            self.query_parser = SIBILSQueryParser(collection=collection)
+        else:
+            self.query_parser = None
 
     def retrieve(
         self,
@@ -74,6 +87,11 @@ class SIBILSRetriever:
     ) -> List[Document]:
         """
         Retrieve documents from SIBILS API.
+
+        If query parser is enabled, the question will be parsed first to:
+        - Annotate biomedical concepts (MeSH, NCIT, AGROVOC)
+        - Expand with ontology terms
+        - Generate optimized Elasticsearch query
 
         Args:
             question: User query/question
@@ -86,18 +104,68 @@ class SIBILSRetriever:
         n = n or self.default_n
         collection = collection or self.collection
 
-        params = {
-            "q": question,
-            "col": collection,
-            "n": n,
-        }
+        # Parse query if enabled
+        parsed_query = None
+        use_es_mode = False
+
+        if self.use_query_parser and self.query_parser:
+            # Parse with ES query generation if enabled
+            parsed_query = self.query_parser.parse(
+                question,
+                collection=collection,
+                include_es_query=self.use_es_query
+            )
+
+            # Try ES query first if available
+            if self.use_es_query and parsed_query.success and parsed_query.es_query:
+                use_es_mode = True
 
         try:
-            response = requests.get(
-                self.api_url,
-                params=params,
-                timeout=self.timeout,
-            )
+            if use_es_mode and parsed_query.es_query:
+                # Use POST with Elasticsearch query (jq parameter)
+                import json
+                params = {
+                    "col": collection,
+                    "n": n,
+                }
+                # SIBILS expects jq as form data, not JSON body
+                data = {
+                    "jq": json.dumps(parsed_query.es_query)
+                }
+                response = requests.post(
+                    self.api_url,
+                    params=params,
+                    data=data,
+                    timeout=self.timeout,
+                )
+            elif parsed_query and parsed_query.success and parsed_query.text_parts:
+                # Use keywords from parser (clean, no punctuation)
+                keywords = [part for part in parsed_query.text_parts
+                           if part not in ['?', '!', '.', ',']]
+                query_text = ' '.join(keywords) if keywords else question
+
+                params = {
+                    "q": query_text,
+                    "col": collection,
+                    "n": n,
+                }
+                response = requests.get(
+                    self.api_url,
+                    params=params,
+                    timeout=self.timeout,
+                )
+            else:
+                # Fallback to raw question
+                params = {
+                    "q": question,
+                    "col": collection,
+                    "n": n,
+                }
+                response = requests.get(
+                    self.api_url,
+                    params=params,
+                    timeout=self.timeout,
+                )
             response.raise_for_status()
             data = response.json()
 

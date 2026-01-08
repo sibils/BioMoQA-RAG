@@ -1,5 +1,5 @@
 """
-FastAPI server for V3.1 RAG pipeline (Ultra-Fast with FP8).
+FastAPI server for V3.2 RAG pipeline with SIBILS query parser integration.
 """
 
 from fastapi import FastAPI, HTTPException
@@ -10,9 +10,9 @@ from src.pipeline_vllm_v3_fast import UltraFastRAGPipeline, RAGConfigV3Fast
 
 # Initialize app
 app = FastAPI(
-    title="BioMoQA RAG API V3.1 (Ultra-Fast)",
-    description="Ultra-fast biomedical QA with FP8 quantization and hybrid retrieval",
-    version="3.1.0"
+    title="BioMoQA RAG API V3.2",
+    description="Biomedical QA with SIBILS query parser, hybrid retrieval, and sentence-level citations",
+    version="3.2.0"
 )
 
 # Initialize pipeline (lazy loading)
@@ -23,7 +23,7 @@ def get_pipeline():
     """Lazy load pipeline"""
     global pipeline
     if pipeline is None:
-        print("Initializing V3.1 ultra-fast pipeline...")
+        print("Initializing V3.2 pipeline with query parser...")
         config = RAGConfigV3Fast(
             retrieval_n=20,
             use_smart_retrieval=True,
@@ -31,11 +31,11 @@ def get_pipeline():
             final_n=10,
             max_tokens=384,
             truncate_abstracts=True,
-            quantization="fp8",  # FP8 quantization enabled
-            gpu_memory_utilization=0.7  # Reduced from 0.8
+            quantization=None,  # Disabled to avoid GPU memory issues
+            gpu_memory_utilization=0.4  # Reduced for MIG GPU (76GB available, need <40GB)
         )
         pipeline = UltraFastRAGPipeline(config)
-        print("✓ V3.1 pipeline ready")
+        print("✓ V3.2 pipeline ready")
     return pipeline
 
 
@@ -79,7 +79,7 @@ class QuestionResponse(BaseModel):
 async def startup_event():
     """Initialize pipeline on startup"""
     print("="*80)
-    print("Starting BioMoQA RAG API V3.1 (Ultra-Fast)")
+    print("Starting BioMoQA RAG API V3.2")
     print("="*80)
     get_pipeline()
 
@@ -89,16 +89,17 @@ async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "pipeline_version": "v3.1-fast",
+        "pipeline_version": "v3.2",
         "optimizations": {
-            "fp8_quantization": True,
+            "query_parser_es_mode": True,
+            "concept_expansion": True,
             "smart_hybrid_retrieval": True,
             "parallel_execution": True,
-            "fast_reranking": True,
+            "cross_encoder_reranking": True,
             "relevance_filtering": True,
-            "truncated_context": True
+            "sentence_citations": True
         },
-        "expected_speed": "~5.2s per question",
+        "expected_speed": "~7s per question",
         "ready": pipeline is not None
     }
 
@@ -106,7 +107,13 @@ async def health_check():
 @app.post("/qa", response_model=QuestionResponse)
 async def answer_question(request: QuestionRequest):
     """
-    Answer a biomedical question using V3.1 ultra-fast RAG pipeline.
+    Answer a biomedical question using V3.2 ultra-fast RAG pipeline.
+
+    Features:
+    - SIBILS query parser generates Elasticsearch queries with concept expansion
+    - Hybrid retrieval (Elasticsearch + Dense FAISS)
+    - Cross-encoder reranking
+    - Sentence-level citations
 
     Returns:
         Answer with citations and metadata
