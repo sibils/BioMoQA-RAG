@@ -76,8 +76,6 @@ Documentation = "https://github.com/ecsltae/BioMoQA-RAG#readme"
 Source = "https://github.com/ecsltae/BioMoQA-RAG"
 Issues = "https://github.com/ecsltae/BioMoQA-RAG/issues"
 
-[project.scripts]
-biomoqa-api = "src.api_server_v3_fast:main"
 
 [tool.setuptools]
 packages = ["src", "src.retrieval", "src.generation", "src.reranking", "src.evaluation", "src.utils"]
