@@ -1,0 +1,187 @@
+[build-system]
+requires = [
+    "setuptools>=45",
+    "setuptools_scm[toml]>=6.2"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "biomoqa-rag"
+description = "BioMoQA RAG System - High-performance biomedical question-answering with Retrieval-Augmented Generation"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "SIBILS Team", email = "sibils@unige.ch"}
+]
+keywords = ["rag", "biomedical", "question-answering", "llm", "retrieval", "elasticsearch", "faiss", "vllm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dynamic = ["version"]
+
+dependencies = [
+    # Deep Learning & Transformers
+    "torch>=2.1.0",
+    "transformers>=4.36.0",
+    "accelerate>=0.25.0",
+    "bitsandbytes>=0.41.0",
+    "sentencepiece>=0.1.99",
+
+    # LLM Inference
+    "vllm>=0.2.7",
+
+    # Retrieval & Reranking
+    "sentence-transformers>=2.2.2",
+    "faiss-gpu>=1.7.4",
+    "rank-bm25>=0.2.2",
+
+    # Evaluation Metrics
+    "evaluate>=0.4.0",
+    "rouge-score>=0.1.2",
+    "bert-score>=0.3.13",
+    "nltk>=3.8",
+    "sacrebleu>=2.3.1",
+
+    # Data Processing
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "datasets>=2.14.0",
+
+    # API & Web
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "requests>=2.31.0",
+    "httpx>=0.25.0",
+    "pydantic>=2.5.0",
+
+    # Utilities
+    "tqdm>=4.66.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+viz = [
+    "matplotlib>=3.7.0",
+    "seaborn>=0.12.0",
+    "jupyter>=1.0.0",
+    "ipywidgets>=8.1.0",
+]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+all = [
+    "biomoqa-rag[viz,dev]",
+]
+
+[project.urls]
+Homepage = "https://github.com/ecsltae/BioMoQA-RAG"
+Documentation = "https://github.com/ecsltae/BioMoQA-RAG#readme"
+Source = "https://github.com/ecsltae/BioMoQA-RAG"
+Issues = "https://github.com/ecsltae/BioMoQA-RAG/issues"
+
+[project.scripts]
+biomoqa-api = "src.api_server_v3_fast:main"
+
+[tool.setuptools]
+packages = ["src", "src.retrieval", "src.generation", "src.reranking", "src.evaluation", "src.utils"]
+
+[tool.setuptools_scm]
+write_to = "src/__version__.py"
+
+[tool.black]
+line-length = 120
+target-version = ['py39', 'py310', 'py311', 'py312']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | venv
+  | build
+  | dist
+  | archive
+)/
+'''
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+# see https://github.com/charliermarsh/ruff#supported-rules
+select = ["F", "E", "W", "I001", "C4", "RET", "SIM", "PLC", "PLE", "PLW", "RUF100"]
+ignore = ["E722", "E501", "E402", "W291", "W293"]
+
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.per-file-ignores]
+"src/__init__.py" = ["F401"]
+"src/*/__init__.py" = ["F401"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 16
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+exclude = [
+    "venv",
+    "build",
+    "dist",
+    "archive",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "--tb=short -v --cov=src --cov-report=html --cov-report=term-missing"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__pycache__/*",
+    "*/venv/*",
+    "*/archive/*",
+]
+parallel = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if __name__ == .__main__.:",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
