@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Dict
 
-from src.pipeline_vllm_v3_fast import UltraFastRAGPipeline, RAGConfigV3Fast
+from pipeline_vllm_v3_fast import UltraFastRAGPipeline, RAGConfigV3Fast
 
 # Initialize app
 app = FastAPI(

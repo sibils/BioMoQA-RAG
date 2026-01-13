@@ -106,21 +106,25 @@ Structured Response
 
 ```
 BioMoQA-RAG/
-├── api_server_v3_fast.py          # FastAPI server (V3.1)
 ├── src/
+│   ├── api_server.py              # FastAPI server
 │   ├── pipeline_vllm_v3_fast.py   # Main RAG pipeline
+│   ├── build_dense_index.py       # Build FAISS index
 │   ├── retrieval/
 │   │   ├── query_parser.py        # SIBILS query parser
 │   │   ├── sibils_retriever.py    # BM25 with query parsing
 │   │   ├── dense_retriever.py     # FAISS dense retrieval
 │   │   ├── parallel_hybrid.py     # Hybrid orchestration
 │   │   └── reranker.py            # Cross-encoder reranking
-│   └── generation/
-│       └── llm_generator.py       # vLLM generation
+│   ├── generation/
+│   │   └── llm_generator.py       # vLLM generation
+│   └── evaluation/                # Evaluation metrics
 ├── data/
 │   ├── faiss_index.bin            # Dense index
 │   └── documents.pkl              # 2398 documents
-└── WORK_EXPLANATION.md            # Detailed project evolution
+├── setup_service.sh               # Setup systemd service
+├── biomoqa-rag.service            # Systemd service file
+└── docs/                          # Documentation
 ```
 
 ## Pipeline Evolution

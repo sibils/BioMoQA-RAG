@@ -1,5 +1,5 @@
 [Unit]
-Description=BioMoQA RAG V2 API Server
+Description=BioMoQA RAG V3.1 Ultra-Fast API Server
 After=network.target
 
 [Service]
@@ -7,11 +7,11 @@ Type=simple
 User=egaillac
 WorkingDirectory=/home/egaillac/BioMoQA-RAG
 Environment="PATH=/home/egaillac/BioMoQA-RAG/venv/bin:/usr/local/bin:/usr/bin:/bin"
-ExecStart=/home/egaillac/BioMoQA-RAG/venv/bin/python3 -m uvicorn api_server_v2:app --host 0.0.0.0 --port 9000
+ExecStart=/home/egaillac/BioMoQA-RAG/venv/bin/python3 -m uvicorn src.api_server:app --host 0.0.0.0 --port 9000
 Restart=always
 RestartSec=10
-StandardOutput=append:/home/egaillac/BioMoQA-RAG/logs/api_service.log
-StandardError=append:/home/egaillac/BioMoQA-RAG/logs/api_service_error.log
+StandardOutput=append:/home/egaillac/BioMoQA-RAG/logs/api_v3_fast.log
+StandardError=append:/home/egaillac/BioMoQA-RAG/logs/api_v3_fast_error.log
 
 [Install]
 WantedBy=multi-user.target
