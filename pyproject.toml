@@ -79,8 +79,10 @@ Issues = "https://github.com/ecsltae/BioMoQA-RAG/issues"
 [project.scripts]
 biomoqa-api = "src.api_server:main"
 
-[tool.setuptools]
-packages = ["src"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+exclude = ["src.v1_archive*"]
 
 [tool.setuptools_scm]
 write_to = "src/__version__.py"
