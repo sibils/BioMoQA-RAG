@@ -78,7 +78,7 @@ Issues = "https://github.com/ecsltae/BioMoQA-RAG/issues"
 
 
 [tool.setuptools]
-packages = ["src", "src.retrieval", "src.generation", "src.reranking", "src.evaluation", "src.utils"]
+packages = ["src"]
 
 [tool.setuptools_scm]
 write_to = "src/__version__.py"
