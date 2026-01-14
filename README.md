@@ -1,7 +1,7 @@
 # BioMoQA RAG System
 
 A high-performance biomedical question-answering system using Retrieval-Augmented Generation (RAG) with intelligent query parsing, hybrid retrieval, and optimized inference.
-**API -->** [http://172.30.120.7:9000/docs](url)
+
 
 ## Overview
 
