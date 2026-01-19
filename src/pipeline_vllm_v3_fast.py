@@ -15,11 +15,11 @@ from typing import List, Dict, Optional
 import time
 from vllm import LLM, SamplingParams
 
-from src.retrieval.sibils_retriever import SIBILSRetriever
-from src.retrieval.dense_retriever import DenseRetriever
-from src.retrieval.parallel_hybrid import ParallelHybridRetriever, SmartHybridRetriever
-from src.retrieval.reranker import SemanticReranker
-from src.retrieval.relevance_filter import FastRelevanceFilter
+from .retrieval.sibils_retriever import SIBILSRetriever
+from .retrieval.dense_retriever import DenseRetriever
+from .retrieval.parallel_hybrid import ParallelHybridRetriever, SmartHybridRetriever
+from .retrieval.reranker import SemanticReranker
+from .retrieval.relevance_filter import FastRelevanceFilter
 
 
 @dataclass
