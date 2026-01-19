@@ -27,7 +27,7 @@ dependencies = [
 
     # Retrieval & Reranking
     "sentence-transformers>=2.2.2",
-    "faiss-gpu>=1.7.4",
+    "faiss-cpu>=1.7.4",
     "rank-bm25>=0.2.2",
 
     # Evaluation Metrics
