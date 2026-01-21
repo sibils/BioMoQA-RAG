@@ -24,8 +24,11 @@ results/*.json
 # Model cache
 .cache/
 *.pt
-*.bin
 *.safetensors
+
+# Keep data files (FAISS index and documents)
+!data/faiss_index.bin
+!data/documents.pkl
 
 # IDE
 .vscode/
