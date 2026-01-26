@@ -49,7 +49,7 @@ class RAGConfig:
     final_n: int = 10  # Reduced from 15
 
     # Generation (optimized)
-    model_name: str = "Qwen/Qwen2.5-7B-Instruct"
+    model_name: str = "Qwen/Qwen2.5-3B-Instruct"  # Default to 3B (~6GB VRAM)
     use_vllm: bool = True
     use_cpu: bool = False  # Use CPU inference with transformers instead of vLLM
     quantization: Optional[str] = "fp8"  # FP8 quantization (GPU only)
