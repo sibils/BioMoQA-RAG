@@ -1,0 +1,43 @@
+[Unit]
+Description=BioMoQA RAG API Server
+Documentation=https://github.com/sibils/BioMoQA-RAG
+After=network.target
+
+[Service]
+Type=simple
+User={{ biomoqa_user }}
+Group={{ biomoqa_group }}
+WorkingDirectory={{ biomoqa_install_dir }}
+
+# Environment file
+EnvironmentFile={{ biomoqa_install_dir }}/.env
+
+# Run with uv
+ExecStart={{ ansible_env.HOME }}/.local/bin/uv run biomoqa-api
+
+# Restart policy
+Restart=on-failure
+RestartSec=10
+
+# Resource limits
+{% if biomoqa_memory_limit %}
+MemoryLimit={{ biomoqa_memory_limit }}
+{% endif %}
+{% if biomoqa_cpu_quota %}
+CPUQuota={{ biomoqa_cpu_quota }}
+{% endif %}
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths={{ biomoqa_install_dir }}
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=biomoqa
+
+[Install]
+WantedBy=multi-user.target

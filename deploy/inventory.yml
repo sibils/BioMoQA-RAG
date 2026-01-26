@@ -1,0 +1,15 @@
+---
+# Example inventory file for BioMoQA RAG deployment
+# Copy this file and customize for your environment
+
+all:
+  children:
+    biomoqa_servers:
+      hosts:
+        # Add your server(s) here
+        biomoqa-prod:
+          ansible_host: 192.168.1.100
+          ansible_user: ubuntu
+          # Override variables per host if needed
+          # biomoqa_use_cpu: false
+          # biomoqa_port: 9000

@@ -1,0 +1,118 @@
+---
+# BioMoQA RAG Deployment Playbook
+# Usage: ansible-playbook -i inventory.yml playbook.yml
+
+- name: Deploy BioMoQA RAG API
+  hosts: biomoqa_servers
+  become: true
+  vars:
+    biomoqa_user: "{{ ansible_user }}"
+    biomoqa_group: "{{ ansible_user }}"
+
+  tasks:
+    - name: Install system dependencies
+      apt:
+        name:
+          - python3-dev
+          - build-essential
+          - git
+        state: present
+        update_cache: true
+
+    - name: Install uv package manager
+      shell: curl -LsSf https://astral.sh/uv/install.sh | sh
+      args:
+        creates: "{{ ansible_env.HOME }}/.local/bin/uv"
+      become: false
+
+    - name: Create application directory
+      file:
+        path: "{{ biomoqa_install_dir }}"
+        state: directory
+        owner: "{{ biomoqa_user }}"
+        group: "{{ biomoqa_group }}"
+        mode: "0755"
+
+    - name: Create data directory
+      file:
+        path: "{{ biomoqa_install_dir }}/data"
+        state: directory
+        owner: "{{ biomoqa_user }}"
+        group: "{{ biomoqa_group }}"
+        mode: "0755"
+
+    - name: Initialize uv project
+      shell: |
+        cd {{ biomoqa_install_dir }}
+        {{ ansible_env.HOME }}/.local/bin/uv init --no-readme
+      args:
+        creates: "{{ biomoqa_install_dir }}/pyproject.toml"
+      become: false
+
+    - name: Install BioMoQA RAG package
+      shell: |
+        cd {{ biomoqa_install_dir }}
+        {{ ansible_env.HOME }}/.local/bin/uv add git+{{ biomoqa_repo_url }}
+      become: false
+      register: uv_install
+      changed_when: "'Already installed' not in uv_install.stdout"
+
+    - name: Sync uv dependencies
+      shell: |
+        cd {{ biomoqa_install_dir }}
+        {{ ansible_env.HOME }}/.local/bin/uv sync
+      become: false
+
+    - name: Copy FAISS index files
+      copy:
+        src: "{{ item }}"
+        dest: "{{ biomoqa_install_dir }}/data/"
+        owner: "{{ biomoqa_user }}"
+        group: "{{ biomoqa_group }}"
+        mode: "0644"
+      loop:
+        - "{{ biomoqa_data_source }}/faiss_index.bin"
+        - "{{ biomoqa_data_source }}/documents.pkl"
+      when: biomoqa_copy_data | default(false)
+
+    - name: Create symlink to data directory (if using shared data)
+      file:
+        src: "{{ biomoqa_data_source }}"
+        dest: "{{ biomoqa_install_dir }}/data"
+        state: link
+        force: true
+      when: biomoqa_link_data | default(false)
+
+    - name: Create environment file
+      template:
+        src: templates/biomoqa.env.j2
+        dest: "{{ biomoqa_install_dir }}/.env"
+        owner: "{{ biomoqa_user }}"
+        group: "{{ biomoqa_group }}"
+        mode: "0600"
+
+    - name: Deploy systemd service
+      template:
+        src: templates/biomoqa.service.j2
+        dest: /etc/systemd/system/biomoqa.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload systemd
+
+    - name: Enable and start BioMoQA service
+      systemd:
+        name: biomoqa
+        enabled: true
+        state: started
+      when: biomoqa_start_service | default(true)
+
+  handlers:
+    - name: Reload systemd
+      systemd:
+        daemon_reload: true
+
+    - name: Restart biomoqa
+      systemd:
+        name: biomoqa
+        state: restarted

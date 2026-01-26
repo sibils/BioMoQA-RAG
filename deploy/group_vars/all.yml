@@ -1,0 +1,41 @@
+---
+# BioMoQA RAG deployment variables
+# Override these in your inventory or host_vars as needed
+
+# Installation
+biomoqa_install_dir: "/opt/biomoqa"
+biomoqa_repo_url: "ssh://git@github.com/sibils/BioMoQA-RAG.git"
+
+# Data files (FAISS index)
+# Option 1: Copy data files from local source
+biomoqa_copy_data: false
+biomoqa_data_source: "/path/to/data"
+
+# Option 2: Symlink to existing data directory
+biomoqa_link_data: false
+
+# Server configuration
+biomoqa_host: "0.0.0.0"
+biomoqa_port: 9000
+biomoqa_workers: 1  # Keep at 1 for GPU mode
+biomoqa_log_level: "info"
+
+# Inference mode (choose one)
+# Option 1: GPU mode (default) - requires ~6GB VRAM
+biomoqa_use_cpu: false
+biomoqa_use_gpu_small: false
+biomoqa_model_size: "3b"
+
+# Option 2: CPU mode - set biomoqa_use_cpu: true
+# biomoqa_use_cpu: true
+# biomoqa_model_size: "3b"  # or "1.5b", "0.5b" for faster/smaller
+
+# Option 3: Small GPU mode (~8GB VRAM)
+# biomoqa_use_gpu_small: true
+
+# Service management
+biomoqa_start_service: true
+
+# Resource limits (systemd)
+biomoqa_memory_limit: "16G"  # Adjust based on model size
+biomoqa_cpu_quota: ""  # e.g., "200%" for 2 CPU cores, empty for unlimited

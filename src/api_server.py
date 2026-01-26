@@ -5,14 +5,26 @@ Environment variables:
     BIOMOQA_USE_CPU: Set to "true" for CPU inference (default: false)
     BIOMOQA_MODEL_SIZE: Model size for CPU mode: "0.5b", "1.5b", "3b", "7b" (default: "3b")
     BIOMOQA_GPU_SMALL: Set to "true" for small GPU model (~8GB VRAM) (default: false)
+    BIOMOQA_HOST: Host to bind to (default: 0.0.0.0)
+    BIOMOQA_PORT: Port to bind to (default: 9000)
+    BIOMOQA_WORKERS: Number of uvicorn workers (default: 1, use 1 for GPU)
+    BIOMOQA_LOG_LEVEL: Log level (default: info)
 """
 
 import os
+import logging
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Dict
 
 from .pipeline import RAGPipeline, RAGConfig
+
+# Configure logging
+logging.basicConfig(
+    level=getattr(logging, os.getenv("BIOMOQA_LOG_LEVEL", "INFO").upper()),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("biomoqa")
 
 # Initialize app
 app = FastAPI(
@@ -29,7 +41,7 @@ def get_pipeline():
     """Lazy load pipeline based on environment configuration"""
     global pipeline
     if pipeline is None:
-        print("Initializing BioMoQA RAG pipeline...")
+        logger.info("Initializing BioMoQA RAG pipeline...")
 
         # Check environment variables for configuration
         use_cpu = os.getenv("BIOMOQA_USE_CPU", "false").lower() == "true"
@@ -38,16 +50,15 @@ def get_pipeline():
 
         if use_cpu:
             # CPU inference with transformers
-            print(f"  Mode: CPU inference")
-            print(f"  Model size: {model_size}")
+            logger.info(f"Mode: CPU inference, model size: {model_size}")
             config = RAGConfig.cpu_config(model_size=model_size)
         elif use_gpu_small:
             # Small GPU model (~8GB VRAM)
-            print("  Mode: GPU (small model, ~8GB VRAM)")
+            logger.info("Mode: GPU (small model, ~8GB VRAM)")
             config = RAGConfig.gpu_small_config()
         else:
             # Default: full GPU mode
-            print("  Mode: GPU (full model)")
+            logger.info("Mode: GPU (full model)")
             config = RAGConfig(
                 retrieval_n=20,
                 use_smart_retrieval=True,
@@ -60,7 +71,7 @@ def get_pipeline():
             )
 
         pipeline = RAGPipeline(config)
-        print("✓ Pipeline ready")
+        logger.info("Pipeline ready")
     return pipeline
 
 
@@ -103,9 +114,9 @@ class QuestionResponse(BaseModel):
 @app.on_event("startup")
 async def startup_event():
     """Initialize pipeline on startup"""
-    print("="*80)
-    print("Starting BioMoQA RAG API")
-    print("="*80)
+    logger.info("=" * 60)
+    logger.info("Starting BioMoQA RAG API")
+    logger.info("=" * 60)
     get_pipeline()
 
 
@@ -224,6 +235,26 @@ async def root():
     }
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the BioMoQA API server."""
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=9000)
+
+    host = os.getenv("BIOMOQA_HOST", "0.0.0.0")
+    port = int(os.getenv("BIOMOQA_PORT", "9000"))
+    workers = int(os.getenv("BIOMOQA_WORKERS", "1"))
+    log_level = os.getenv("BIOMOQA_LOG_LEVEL", "info").lower()
+
+    logger.info(f"Starting server on {host}:{port} with {workers} worker(s)")
+
+    uvicorn.run(
+        "src.api_server:app",
+        host=host,
+        port=port,
+        workers=workers,
+        log_level=log_level,
+        access_log=True,
+    )
+
+
+if __name__ == "__main__":
+    main()
