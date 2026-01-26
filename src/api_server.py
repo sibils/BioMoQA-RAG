@@ -1,7 +1,13 @@
 """
 FastAPI server for BioMoQA RAG pipeline.
+
+Environment variables:
+    BIOMOQA_USE_CPU: Set to "true" for CPU inference (default: false)
+    BIOMOQA_MODEL_SIZE: Model size for CPU mode: "0.5b", "1.5b", "3b", "7b" (default: "3b")
+    BIOMOQA_GPU_SMALL: Set to "true" for small GPU model (~8GB VRAM) (default: false)
 """
 
+import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Dict
@@ -20,20 +26,39 @@ pipeline = None
 
 
 def get_pipeline():
-    """Lazy load pipeline"""
+    """Lazy load pipeline based on environment configuration"""
     global pipeline
     if pipeline is None:
         print("Initializing BioMoQA RAG pipeline...")
-        config = RAGConfig(
-            retrieval_n=20,
-            use_smart_retrieval=True,
-            use_reranking=True,
-            final_n=10,
-            max_tokens=384,
-            truncate_abstracts=True,
-            quantization=None,  # Disabled to avoid GPU memory issues
-            gpu_memory_utilization=0.4  # Reduced for MIG GPU
-        )
+
+        # Check environment variables for configuration
+        use_cpu = os.getenv("BIOMOQA_USE_CPU", "false").lower() == "true"
+        use_gpu_small = os.getenv("BIOMOQA_GPU_SMALL", "false").lower() == "true"
+        model_size = os.getenv("BIOMOQA_MODEL_SIZE", "3b")
+
+        if use_cpu:
+            # CPU inference with transformers
+            print(f"  Mode: CPU inference")
+            print(f"  Model size: {model_size}")
+            config = RAGConfig.cpu_config(model_size=model_size)
+        elif use_gpu_small:
+            # Small GPU model (~8GB VRAM)
+            print("  Mode: GPU (small model, ~8GB VRAM)")
+            config = RAGConfig.gpu_small_config()
+        else:
+            # Default: full GPU mode
+            print("  Mode: GPU (full model)")
+            config = RAGConfig(
+                retrieval_n=20,
+                use_smart_retrieval=True,
+                use_reranking=True,
+                final_n=10,
+                max_tokens=384,
+                truncate_abstracts=True,
+                quantization=None,  # Disabled to avoid GPU memory issues
+                gpu_memory_utilization=0.4  # Reduced for MIG GPU
+            )
+
         pipeline = RAGPipeline(config)
         print("✓ Pipeline ready")
     return pipeline
@@ -87,15 +112,25 @@ async def startup_event():
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
+    config_info = {}
+    if pipeline is not None:
+        config_info = {
+            "model": pipeline.config.model_name,
+            "inference_mode": "cpu" if pipeline.config.use_cpu else "gpu",
+            "use_vllm": pipeline.config.use_vllm,
+        }
+
     return {
         "status": "healthy",
         "features": {
             "hybrid_retrieval": True,
             "cross_encoder_reranking": True,
             "relevance_filtering": True,
-            "sentence_citations": True
+            "sentence_citations": True,
+            "cpu_inference": True,
         },
-        "ready": pipeline is not None
+        "ready": pipeline is not None,
+        "config": config_info
     }
 
 

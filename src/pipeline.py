@@ -10,7 +10,21 @@ Features:
 from dataclasses import dataclass
 from typing import List, Dict, Optional
 import time
-from vllm import LLM, SamplingParams
+
+# vLLM import (for GPU inference)
+try:
+    from vllm import LLM, SamplingParams
+    VLLM_AVAILABLE = True
+except ImportError:
+    VLLM_AVAILABLE = False
+
+# Transformers import (for CPU inference)
+try:
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    import torch
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
 
 from .retrieval.sibils_retriever import SIBILSRetriever
 from .retrieval.dense_retriever import DenseRetriever
@@ -37,7 +51,8 @@ class RAGConfig:
     # Generation (optimized)
     model_name: str = "Qwen/Qwen2.5-7B-Instruct"
     use_vllm: bool = True
-    quantization: Optional[str] = "fp8"  # FP8 quantization
+    use_cpu: bool = False  # Use CPU inference with transformers instead of vLLM
+    quantization: Optional[str] = "fp8"  # FP8 quantization (GPU only)
     gpu_memory_utilization: float = 0.8
     max_tokens: int = 384  # Reduced from 512
     temperature: float = 0.1
@@ -49,6 +64,40 @@ class RAGConfig:
     # Performance
     enable_parallel: bool = True
     timeout: float = 10.0
+
+    @classmethod
+    def cpu_config(cls, model_size: str = "3b") -> "RAGConfig":
+        """Create a CPU-optimized configuration with smaller models.
+
+        Args:
+            model_size: "1.5b", "3b", or "7b" for Qwen2.5 model sizes
+        """
+        model_map = {
+            "0.5b": "Qwen/Qwen2.5-0.5B-Instruct",
+            "1.5b": "Qwen/Qwen2.5-1.5B-Instruct",
+            "3b": "Qwen/Qwen2.5-3B-Instruct",
+            "7b": "Qwen/Qwen2.5-7B-Instruct",
+        }
+        return cls(
+            model_name=model_map.get(model_size, model_map["3b"]),
+            use_vllm=False,
+            use_cpu=True,
+            quantization=None,
+            max_tokens=256,  # Reduced for CPU
+            final_n=5,  # Fewer docs for faster processing
+        )
+
+    @classmethod
+    def gpu_small_config(cls) -> "RAGConfig":
+        """Create a GPU configuration with smaller model (requires ~8GB VRAM)."""
+        return cls(
+            model_name="Qwen/Qwen2.5-3B-Instruct",
+            use_vllm=True,
+            use_cpu=False,
+            quantization="fp8",
+            gpu_memory_utilization=0.8,
+            max_tokens=384,
+        )
 
 
 class RAGPipeline:
@@ -118,8 +167,35 @@ class RAGPipeline:
             self.relevance_filter = FastRelevanceFilter(min_overlap=0.15)
             print("✓ Loaded relevance filter")
 
-        # Load vLLM with quantization
-        if self.config.use_vllm:
+        # Load LLM (vLLM for GPU or transformers for CPU)
+        self.llm = None
+        self.tokenizer = None
+
+        if self.config.use_cpu:
+            # CPU inference with transformers
+            if not TRANSFORMERS_AVAILABLE:
+                raise ImportError("transformers is required for CPU inference. Install with: pip install transformers torch")
+
+            print(f"\nLoading model for CPU: {self.config.model_name}")
+            print("  Mode: CPU inference (transformers)")
+
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.config.model_name,
+                trust_remote_code=True
+            )
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                self.config.model_name,
+                trust_remote_code=True,
+                torch_dtype=torch.float32,  # Full precision for CPU
+                device_map="cpu"
+            )
+            print("✓ Transformers model loaded (CPU)")
+
+        elif self.config.use_vllm:
+            # GPU inference with vLLM
+            if not VLLM_AVAILABLE:
+                raise ImportError("vLLM is required for GPU inference. Install with: pip install vllm")
+
             print(f"\nLoading vLLM model: {self.config.model_name}")
             if self.config.quantization:
                 print(f"  Quantization: {self.config.quantization}")
@@ -137,7 +213,7 @@ class RAGPipeline:
                 vllm_kwargs["quantization"] = self.config.quantization
 
             self.llm = LLM(**vllm_kwargs)
-            print("✓ vLLM model loaded")
+            print("✓ vLLM model loaded (GPU)")
 
         print("\n" + "="*80)
         print("BioMoQA RAG Pipeline Ready")
@@ -276,7 +352,19 @@ Question: {question}
 
 Answer:"""
 
-        # Generate with vLLM (fast settings)
+        # Generate based on backend
+        if self.config.use_cpu:
+            answer_text = self._generate_cpu(prompt)
+        else:
+            answer_text = self._generate_vllm(prompt)
+
+        # Parse answer into sentences with citations
+        parsed_answer = self._parse_answer_with_citations(answer_text, documents)
+
+        return parsed_answer
+
+    def _generate_vllm(self, prompt: str) -> str:
+        """Generate with vLLM (GPU)"""
         sampling_params = SamplingParams(
             temperature=self.config.temperature,
             max_tokens=self.config.max_tokens,
@@ -284,12 +372,25 @@ Answer:"""
         )
 
         outputs = self.llm.generate([prompt], sampling_params)
-        answer_text = outputs[0].outputs[0].text.strip()
+        return outputs[0].outputs[0].text.strip()
 
-        # Parse answer into sentences with citations
-        parsed_answer = self._parse_answer_with_citations(answer_text, documents)
+    def _generate_cpu(self, prompt: str) -> str:
+        """Generate with transformers (CPU)"""
+        inputs = self.tokenizer(prompt, return_tensors="pt")
 
-        return parsed_answer
+        with torch.no_grad():
+            outputs = self.llm.generate(
+                **inputs,
+                max_new_tokens=self.config.max_tokens,
+                temperature=self.config.temperature if self.config.temperature > 0 else None,
+                do_sample=self.config.temperature > 0,
+                top_p=0.9 if self.config.temperature > 0 else None,
+                pad_token_id=self.tokenizer.eos_token_id
+            )
+
+        # Decode only the generated part (exclude input)
+        generated = outputs[0][inputs['input_ids'].shape[1]:]
+        return self.tokenizer.decode(generated, skip_special_tokens=True).strip()
 
     def _parse_answer_with_citations(self, answer_text: str, documents: List) -> Dict:
         """Parse answer text into sentences with citation extraction"""
