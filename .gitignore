@@ -5,11 +5,13 @@ __pycache__/
 *.so
 .Python
 venv/
+.venv/
 ENV/
 env/
 *.egg-info/
 dist/
 build/
+*.egg
 
 # Logs
 logs/
