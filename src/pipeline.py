@@ -284,7 +284,23 @@ class RAGPipeline:
                 debug_info['filter_time'] = time.time() - t0
                 debug_info['filtered_count'] = len(documents)
 
-        # Step 4: Generate answer with optimizations
+        # Step 4: Handle case where no relevant documents found
+        if not documents:
+            return {
+                'question': question,
+                'answer': [{
+                    'text': 'No relevant biomedical sources were found for this question.',
+                    'citation_ids': [],
+                    'citations': []
+                }],
+                'references': [],
+                'response_length': 0,
+                'pipeline_time': time.time() - start_time,
+                'num_retrieved': 0,
+                'pipeline_version': '1.0',
+            }
+
+        # Step 5: Generate answer with optimizations
         t0 = time.time()
         parsed_answer = self.generate_fast(question, documents)
         generation_time = time.time() - t0
@@ -342,10 +358,16 @@ class RAGPipeline:
 
         context = "\n\n".join(context_parts)
 
-        # Optimized prompt (shorter)
-        prompt = f"""Answer using context. Cite sources with [0], [1], etc. at the end of each sentence.
+        # Biomedical QA prompt with clear instructions
+        prompt = f"""You are a biomedical expert assistant. Answer the question based ONLY on the provided scientific sources.
 
-Context:
+Instructions:
+- Be concise and factual (2-4 sentences unless more detail is needed)
+- Cite sources using [0], [1], etc. after each claim
+- If the sources don't contain enough information, say "Based on the available sources, this question cannot be fully answered"
+- Do not add information not present in the sources
+
+Sources:
 {context}
 
 Question: {question}
@@ -396,8 +418,34 @@ Answer:"""
         """Parse answer text into sentences with citation extraction"""
         import re
 
-        # Split into sentences (simple split on period + space)
-        sentences = re.split(r'\.\s+', answer_text)
+        # Smart sentence splitting that handles abbreviations and numbers
+        # First, protect common patterns that shouldn't trigger splits
+        protected = answer_text
+        protections = [
+            (r'(e\.g\.)', '__EG__'),
+            (r'(i\.e\.)', '__IE__'),
+            (r'(et al\.)', '__ETAL__'),
+            (r'(vs\.)', '__VS__'),
+            (r'(Dr\.)', '__DR__'),
+            (r'(Fig\.)', '__FIG__'),
+            (r'(No\.)', '__NO__'),
+            (r'(\d+\.\d+)', '__NUM__'),  # Decimal numbers
+        ]
+        for pattern, placeholder in protections:
+            protected = re.sub(pattern, placeholder, protected)
+
+        # Split on period followed by space and capital letter, or end of string
+        sentences = re.split(r'\.(?:\s+(?=[A-Z])|\s*$)', protected)
+
+        # Restore protected patterns
+        restored_sentences = []
+        for sent in sentences:
+            restored = sent
+            for pattern, placeholder in protections:
+                original = pattern.replace('(', '').replace(')', '').replace('\\', '')
+                restored = restored.replace(placeholder, original)
+            restored_sentences.append(restored)
+        sentences = restored_sentences
 
         parsed_sentences = []
         all_citation_ids = set()
