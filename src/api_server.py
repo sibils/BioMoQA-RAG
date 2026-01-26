@@ -1,27 +1,23 @@
 """
 FastAPI server for BioMoQA RAG pipeline.
 
-Environment variables:
-    BIOMOQA_USE_CPU: Set to "true" for CPU inference (default: false)
-    BIOMOQA_MODEL_SIZE: Model size for CPU mode: "0.5b", "1.5b", "3b", "7b" (default: "3b")
-    BIOMOQA_GPU_SMALL: Set to "true" for small GPU model (~8GB VRAM) (default: false)
-    BIOMOQA_HOST: Host to bind to (default: 0.0.0.0)
-    BIOMOQA_PORT: Port to bind to (default: 9000)
-    BIOMOQA_WORKERS: Number of uvicorn workers (default: 1, use 1 for GPU)
-    BIOMOQA_LOG_LEVEL: Log level (default: info)
+Configuration is read from config.toml in the working directory.
 """
 
-import os
 import logging
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Dict
 
+from .config import get_config
 from .pipeline import RAGPipeline, RAGConfig
+
+# Load configuration
+config = get_config()
 
 # Configure logging
 logging.basicConfig(
-    level=getattr(logging, os.getenv("BIOMOQA_LOG_LEVEL", "INFO").upper()),
+    level=getattr(logging, config.get("server", "log_level", default="info").upper()),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger("biomoqa")
@@ -38,39 +34,40 @@ pipeline = None
 
 
 def get_pipeline():
-    """Lazy load pipeline based on environment configuration"""
+    """Lazy load pipeline based on config.toml configuration"""
     global pipeline
     if pipeline is None:
         logger.info("Initializing BioMoQA RAG pipeline...")
 
-        # Check environment variables for configuration
-        use_cpu = os.getenv("BIOMOQA_USE_CPU", "false").lower() == "true"
-        use_gpu_small = os.getenv("BIOMOQA_GPU_SMALL", "false").lower() == "true"
-        model_size = os.getenv("BIOMOQA_MODEL_SIZE", "3b")
+        mode = config.get("model", "mode", default="gpu")
+        model_size = config.get("model", "size", default="3b")
 
-        if use_cpu:
-            # CPU inference with transformers
+        if mode == "cpu":
             logger.info(f"Mode: CPU inference, model size: {model_size}")
-            config = RAGConfig.cpu_config(model_size=model_size)
-        elif use_gpu_small:
-            # Small GPU model (~8GB VRAM)
+            rag_config = RAGConfig.cpu_config(model_size=model_size)
+        elif mode == "gpu_small":
             logger.info("Mode: GPU (small model, ~8GB VRAM)")
-            config = RAGConfig.gpu_small_config()
+            rag_config = RAGConfig.gpu_small_config()
         else:
-            # Default: full GPU mode
-            logger.info("Mode: GPU (full model)")
-            config = RAGConfig(
-                retrieval_n=20,
-                use_smart_retrieval=True,
-                use_reranking=True,
-                final_n=10,
-                max_tokens=384,
-                truncate_abstracts=True,
-                quantization=None,  # Disabled to avoid GPU memory issues
-                gpu_memory_utilization=0.4  # Reduced for MIG GPU
+            logger.info("Mode: GPU (default)")
+            rag_config = RAGConfig(
+                retrieval_n=config.get("retrieval", "retrieval_n", default=20),
+                use_smart_retrieval=config.get("retrieval", "use_smart_retrieval", default=True),
+                hybrid_alpha=config.get("retrieval", "hybrid_alpha", default=0.5),
+                use_reranking=config.get("reranking", "enabled", default=True),
+                reranker_model=config.get("reranking", "model", default="cross-encoder/ms-marco-MiniLM-L-6-v2"),
+                rerank_n=config.get("reranking", "top_k", default=15),
+                use_relevance_filter=config.get("relevance_filter", "enabled", default=True),
+                final_n=config.get("relevance_filter", "final_n", default=10),
+                max_tokens=config.get("generation", "max_tokens", default=384),
+                temperature=config.get("generation", "temperature", default=0.1),
+                max_abstract_length=config.get("context", "max_abstract_length", default=800),
+                truncate_abstracts=config.get("context", "truncate_abstracts", default=True),
+                quantization=config.get("model", "quantization", default="fp8"),
+                gpu_memory_utilization=config.get("model", "gpu_memory_utilization", default=0.8),
             )
 
-        pipeline = RAGPipeline(config)
+        pipeline = RAGPipeline(rag_config)
         logger.info("Pipeline ready")
     return pipeline
 
@@ -239,10 +236,10 @@ def main():
     """Entry point for the BioMoQA API server."""
     import uvicorn
 
-    host = os.getenv("BIOMOQA_HOST", "0.0.0.0")
-    port = int(os.getenv("BIOMOQA_PORT", "9000"))
-    workers = int(os.getenv("BIOMOQA_WORKERS", "1"))
-    log_level = os.getenv("BIOMOQA_LOG_LEVEL", "info").lower()
+    host = config.get("server", "host", default="0.0.0.0")
+    port = config.get("server", "port", default=9000)
+    workers = config.get("server", "workers", default=1)
+    log_level = config.get("server", "log_level", default="info").lower()
 
     logger.info(f"Starting server on {host}:{port} with {workers} worker(s)")
 

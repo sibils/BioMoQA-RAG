@@ -1,0 +1,51 @@
+# BioMoQA RAG Configuration
+
+[server]
+host = "0.0.0.0"
+port = 9000
+workers = 1  # Keep at 1 for GPU mode
+log_level = "info"
+
+[model]
+# Inference mode: "gpu", "gpu_small", or "cpu"
+mode = "gpu"
+
+# Model size for CPU mode: "0.5b", "1.5b", "3b", "7b"
+size = "3b"
+
+# GPU settings
+gpu_memory_utilization = 0.8
+quantization = "fp8"  # or null to disable
+
+[generation]
+max_tokens = 384
+temperature = 0.1
+
+[retrieval]
+# Number of documents to retrieve initially
+retrieval_n = 20
+
+# Use smart hybrid retrieval (SIBILS + FAISS)
+use_smart_retrieval = true
+
+# Hybrid retrieval weight (0 = SIBILS only, 1 = FAISS only)
+hybrid_alpha = 0.5
+
+[reranking]
+enabled = true
+model = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+top_k = 15
+
+[relevance_filter]
+enabled = true
+min_overlap = 0.15
+final_n = 10
+
+[context]
+max_abstract_length = 800
+truncate_abstracts = true
+
+[data]
+# Path to FAISS index and documents
+faiss_index = "data/faiss_index.bin"
+documents = "data/documents.pkl"

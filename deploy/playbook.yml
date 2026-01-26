@@ -83,13 +83,14 @@
         force: true
       when: biomoqa_link_data | default(false)
 
-    - name: Create environment file
+    - name: Deploy config.toml
       template:
-        src: templates/biomoqa.env.j2
-        dest: "{{ biomoqa_install_dir }}/.env"
+        src: templates/config.toml.j2
+        dest: "{{ biomoqa_install_dir }}/config.toml"
         owner: "{{ biomoqa_user }}"
         group: "{{ biomoqa_group }}"
-        mode: "0600"
+        mode: "0644"
+      notify: Restart biomoqa
 
     - name: Deploy systemd service
       template:

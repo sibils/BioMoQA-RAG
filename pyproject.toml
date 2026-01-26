@@ -1,12 +1,6 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.metadata]
-allow-direct-references = true
-
-[tool.hatch.build.targets.wheel]
-packages = ["src"]
+requires = ["uv_build>=0.9.7,<0.10.0"]
+build-backend = "uv_build"
 
 [project]
 name = "biomoqa-rag"
@@ -52,7 +46,7 @@ dependencies = [
     # Utilities
     "tqdm>=4.66.0",
     "pyyaml>=6.0",
-    "python-dotenv>=1.0.0",
+    "tomli>=2.0.0;python_version<'3.11'",  # TOML parser (built-in in 3.11+)
 ]
 
 [project.optional-dependencies]

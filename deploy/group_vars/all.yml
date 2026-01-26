@@ -14,28 +14,65 @@ biomoqa_data_source: "/path/to/data"
 # Option 2: Symlink to existing data directory
 biomoqa_link_data: false
 
+# ============================================
 # Server configuration
+# ============================================
 biomoqa_host: "0.0.0.0"
 biomoqa_port: 9000
 biomoqa_workers: 1  # Keep at 1 for GPU mode
 biomoqa_log_level: "info"
 
-# Inference mode (choose one)
-# Option 1: GPU mode (default) - requires ~6GB VRAM
-biomoqa_use_cpu: false
-biomoqa_use_gpu_small: false
+# ============================================
+# Model configuration
+# ============================================
+# Inference mode: "gpu", "gpu_small", or "cpu"
+biomoqa_mode: "gpu"
+
+# Model size (for CPU mode): "0.5b", "1.5b", "3b", "7b"
 biomoqa_model_size: "3b"
 
-# Option 2: CPU mode - set biomoqa_use_cpu: true
-# biomoqa_use_cpu: true
-# biomoqa_model_size: "3b"  # or "1.5b", "0.5b" for faster/smaller
+# GPU settings
+biomoqa_gpu_memory_utilization: 0.8
+biomoqa_quantization: "fp8"  # Set to null/empty to disable
 
-# Option 3: Small GPU mode (~8GB VRAM)
-# biomoqa_use_gpu_small: true
+# ============================================
+# Generation settings
+# ============================================
+biomoqa_max_tokens: 384
+biomoqa_temperature: 0.1
 
+# ============================================
+# Retrieval settings
+# ============================================
+biomoqa_retrieval_n: 20
+biomoqa_use_smart_retrieval: true
+biomoqa_hybrid_alpha: 0.5
+
+# ============================================
+# Reranking settings
+# ============================================
+biomoqa_reranking_enabled: true
+biomoqa_reranker_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+biomoqa_rerank_top_k: 15
+
+# ============================================
+# Relevance filter settings
+# ============================================
+biomoqa_relevance_filter_enabled: true
+biomoqa_min_overlap: 0.15
+biomoqa_final_n: 10
+
+# ============================================
+# Context settings
+# ============================================
+biomoqa_max_abstract_length: 800
+biomoqa_truncate_abstracts: true
+
+# ============================================
 # Service management
+# ============================================
 biomoqa_start_service: true
 
 # Resource limits (systemd)
-biomoqa_memory_limit: "16G"  # Adjust based on model size
-biomoqa_cpu_quota: ""  # e.g., "200%" for 2 CPU cores, empty for unlimited
+biomoqa_memory_limit: "16G"
+biomoqa_cpu_quota: ""

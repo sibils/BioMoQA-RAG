@@ -9,9 +9,6 @@ User={{ biomoqa_user }}
 Group={{ biomoqa_group }}
 WorkingDirectory={{ biomoqa_install_dir }}
 
-# Environment file
-EnvironmentFile={{ biomoqa_install_dir }}/.env
-
 # Run with uv
 ExecStart={{ ansible_env.HOME }}/.local/bin/uv run biomoqa-api
 
