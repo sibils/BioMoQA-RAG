@@ -74,10 +74,10 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ecsltae/BioMoQA-RAG"
-Documentation = "https://github.com/ecsltae/BioMoQA-RAG#readme"
-Source = "https://github.com/ecsltae/BioMoQA-RAG"
-Issues = "https://github.com/ecsltae/BioMoQA-RAG/issues"
+Homepage = "https://github.com/sibils/BioMoQA-RAG"
+Documentation = "https://github.com/sibils/BioMoQA-RAG#readme"
+Source = "https://github.com/sibils/BioMoQA-RAG"
+Issues = "https://github.com/sibils/BioMoQA-RAG/issues"
 
 [project.scripts]
 biomoqa-api = "src.api_server:main"

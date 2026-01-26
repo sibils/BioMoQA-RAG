@@ -1,247 +1,355 @@
 """
-End-to-End RAG Pipeline for BioMoQA-Ragnarok
+BioMoQA RAG Pipeline for biomedical question answering.
 
-Implements the full Ragnarok framework:
-1. (R) Retrieval: SIBILS API
-2. Reranking (optional): LLM-based reranking
-3. (AG) Augmented Generation: Open-source LLM with citations
+Features:
+- Hybrid retrieval (SIBILS + FAISS dense search)
+- Cross-encoder reranking
+- vLLM generation with sentence-level citations
 """
 
+from dataclasses import dataclass
 from typing import List, Dict, Optional
 import time
-from dataclasses import dataclass
+from vllm import LLM, SamplingParams
 
-from .retrieval import SIBILSRetriever, Document
-from .generation import LLMGenerator
+from .retrieval.sibils_retriever import SIBILSRetriever
+from .retrieval.dense_retriever import DenseRetriever
+from .retrieval.parallel_hybrid import ParallelHybridRetriever, SmartHybridRetriever
+from .retrieval.reranker import SemanticReranker
+from .retrieval.relevance_filter import FastRelevanceFilter
 
 
 @dataclass
 class RAGConfig:
-    """Configuration for RAG pipeline."""
+    """Configuration for the RAG pipeline"""
     # Retrieval
-    retrieval_n: int = 100
-    retrieval_collection: str = "pmc"
+    retrieval_n: int = 20
+    use_smart_retrieval: bool = True
+    hybrid_alpha: float = 0.5
 
-    # Reranking
-    rerank: bool = False
-    rerank_n: int = 20
+    # Processing (streamlined)
+    use_reranking: bool = True
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    rerank_n: int = 15
+    use_relevance_filter: bool = True
+    final_n: int = 10  # Reduced from 15
 
-    # Generation
-    model_name: str = "meta-llama/Llama-3.1-8B-Instruct"
-    load_in_4bit: bool = True
-    max_new_tokens: int = 512
-    temperature: float = 0.7
+    # Generation (optimized)
+    model_name: str = "Qwen/Qwen2.5-7B-Instruct"
+    use_vllm: bool = True
+    quantization: Optional[str] = "fp8"  # FP8 quantization
+    gpu_memory_utilization: float = 0.8
+    max_tokens: int = 384  # Reduced from 512
+    temperature: float = 0.1
 
-    # General
-    device: str = "cuda"
+    # Context optimization
+    max_abstract_length: int = 800  # ~200 words
+    truncate_abstracts: bool = True
+
+    # Performance
+    enable_parallel: bool = True
+    timeout: float = 10.0
 
 
 class RAGPipeline:
     """
-    Complete RAG pipeline for biomedical question answering.
+    BioMoQA RAG Pipeline for biomedical question answering.
 
-    Usage:
-        pipeline = RAGPipeline()
-        result = pipeline.run("What is the host of Plasmodium falciparum?")
-        print(result['answer'])
+    Features:
+    - Hybrid retrieval combining SIBILS BM25 and FAISS dense search
+    - Cross-encoder reranking for improved relevance
+    - vLLM generation with sentence-level citations
     """
 
-    def __init__(self, config: Optional[RAGConfig] = None):
-        """
-        Initialize RAG pipeline.
-
-        Args:
-            config: Pipeline configuration (uses defaults if None)
-        """
+    def __init__(self, config: RAGConfig = None):
         self.config = config or RAGConfig()
 
-        print("Initializing BioMoQA-Ragnarok Pipeline...")
-        print(f"Config: {self.config}\n")
+        print("="*80)
+        print("Initializing BioMoQA RAG Pipeline")
+        print("="*80)
+        print()
+        print("Configuration:")
+        if self.config.quantization:
+            print(f"  ✓ Quantization: {self.config.quantization}")
+        print(f"  ✓ Max tokens: {self.config.max_tokens}")
+        print(f"  ✓ Context docs: {self.config.final_n}")
+        print(f"  ✓ Truncate abstracts: {self.config.truncate_abstracts}")
+        print()
 
-        # Initialize retriever
-        print("Loading retriever...")
-        self.retriever = SIBILSRetriever(
-            collection=self.config.retrieval_collection,
-            default_n=self.config.retrieval_n,
+        # Load retrievers
+        print("Loading retrievers...")
+        self.sibils = SIBILSRetriever()
+
+        self.dense = DenseRetriever(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
         )
+        self.dense.load("data/faiss_index.bin", "data/documents.pkl")
 
-        # Initialize generator (lazy loading - only when needed)
-        self.generator = None
-
-        print("Pipeline initialized successfully!\n")
-
-    def _load_generator(self):
-        """Lazy load the LLM generator (only when first needed)."""
-        if self.generator is None:
-            print("Loading LLM generator (this may take a few minutes)...")
-            self.generator = LLMGenerator(
-                model_name=self.config.model_name,
-                device=self.config.device,
-                load_in_4bit=self.config.load_in_4bit,
-                max_new_tokens=self.config.max_new_tokens,
+        # Smart hybrid retriever
+        if self.config.use_smart_retrieval:
+            self.retriever = SmartHybridRetriever(
+                self.sibils,
+                self.dense,
+                alpha=self.config.hybrid_alpha,
+                k=60
             )
+            print("✓ Using SmartHybridRetriever")
+        else:
+            self.retriever = ParallelHybridRetriever(
+                self.sibils,
+                self.dense,
+                alpha=self.config.hybrid_alpha,
+                k=60,
+                timeout=self.config.timeout
+            )
+            print("✓ Using ParallelHybridRetriever")
 
-    def retrieve(self, question: str) -> List[Document]:
-        """
-        Retrieval stage (R).
+        # Reranker
+        self.reranker = None
+        if self.config.use_reranking:
+            self.reranker = SemanticReranker(
+                model_name=self.config.reranker_model
+            )
+            print(f"✓ Loaded reranker")
 
-        Args:
-            question: User question
+        # Relevance filter
+        self.relevance_filter = None
+        if self.config.use_relevance_filter:
+            self.relevance_filter = FastRelevanceFilter(min_overlap=0.15)
+            print("✓ Loaded relevance filter")
 
-        Returns:
-            List of retrieved documents
-        """
-        docs = self.retriever.retrieve(
-            question,
-            n=self.config.retrieval_n,
-        )
-        return docs
+        # Load vLLM with quantization
+        if self.config.use_vllm:
+            print(f"\nLoading vLLM model: {self.config.model_name}")
+            if self.config.quantization:
+                print(f"  Quantization: {self.config.quantization}")
 
-    def rerank(self, question: str, documents: List[Document]) -> List[Document]:
-        """
-        Reranking stage (optional).
-
-        Args:
-            question: User question
-            documents: Retrieved documents
-
-        Returns:
-            Reranked documents (top-k)
-        """
-        # TODO: Implement proper reranking with cross-encoder or LLM
-        # For now, just return top-k by score
-        if self.config.rerank:
-            return documents[:self.config.rerank_n]
-        return documents
-
-    def generate(
-        self,
-        question: str,
-        documents: List[Document],
-        topic_id: Optional[str] = None,
-    ) -> Dict:
-        """
-        Augmented generation stage (AG).
-
-        Args:
-            question: User question
-            documents: Retrieved/reranked documents
-            topic_id: Optional topic identifier
-
-        Returns:
-            Ragnarok-format output with answer and citations
-        """
-        # Lazy load generator
-        self._load_generator()
-
-        # Format documents for generator
-        doc_dicts = [
-            {
-                "title": doc.title,
-                "text": doc.get_text(max_length=1000),  # Limit context length
-                "id": doc.doc_id,
+            vllm_kwargs = {
+                "model": self.config.model_name,
+                "trust_remote_code": True,
+                "max_model_len": 8192,
+                "gpu_memory_utilization": self.config.gpu_memory_utilization,
+                "disable_log_stats": True,
             }
-            for doc in documents
-        ]
 
-        # Generate answer
-        output = self.generator.generate_ragnarok_output(
-            question=question,
-            documents=doc_dicts,
-            topic_id=topic_id,
-        )
+            # Add quantization if specified
+            if self.config.quantization:
+                vllm_kwargs["quantization"] = self.config.quantization
 
-        return output
+            self.llm = LLM(**vllm_kwargs)
+            print("✓ vLLM model loaded")
+
+        print("\n" + "="*80)
+        print("BioMoQA RAG Pipeline Ready")
+        print("="*80)
+        print()
 
     def run(
         self,
         question: str,
-        topic_id: Optional[str] = None,
+        retrieval_n: Optional[int] = None,
+        final_n: Optional[int] = None,
         return_documents: bool = False,
+        debug: bool = False
     ) -> Dict:
         """
-        Run complete RAG pipeline.
+        Run the RAG pipeline.
 
         Args:
             question: User question
-            topic_id: Optional topic identifier
-            return_documents: Include retrieved documents in output
+            retrieval_n: Override retrieval count
+            final_n: Override final document count
+            return_documents: Include documents in response
+            debug: Include debug information
 
         Returns:
-            Complete pipeline output in Ragnarok format
+            Response dict with answer and metadata
         """
         start_time = time.time()
+        retrieval_n = retrieval_n or self.config.retrieval_n
+        final_n = final_n or self.config.final_n
 
-        print(f"Processing question: {question}\n")
+        debug_info = {} if debug else None
 
-        # Stage 1: Retrieval
-        print(f"[1/3] Retrieving documents (n={self.config.retrieval_n})...")
-        documents = self.retrieve(question)
-        print(f"      Retrieved {len(documents)} documents")
+        # Step 1: Smart retrieval
+        t0 = time.time()
+        documents = self.retriever.retrieve(
+            question,
+            n=retrieval_n,
+            top_k=retrieval_n
+        )
+        retrieval_time = time.time() - t0
 
-        # Stage 2: Reranking (optional)
-        if self.config.rerank:
-            print(f"[2/3] Reranking to top-{self.config.rerank_n}...")
-            documents = self.rerank(question, documents)
-            print(f"      Kept {len(documents)} documents")
-        else:
-            print(f"[2/3] Skipping reranking (using top-{self.config.rerank_n})...")
-            documents = documents[:self.config.rerank_n]
+        if debug:
+            debug_info['retrieval_time'] = retrieval_time
+            debug_info['initial_count'] = len(documents)
 
-        # Stage 3: Generation
-        print(f"[3/3] Generating answer with {self.config.model_name}...")
-        output = self.generate(question, documents, topic_id)
+        # Step 2: Optional reranking
+        if self.reranker and len(documents) > final_n:
+            t0 = time.time()
+            documents = self.reranker.rerank(
+                question,
+                documents,
+                top_k=min(self.config.rerank_n, len(documents))
+            )
+            if debug:
+                debug_info['rerank_time'] = time.time() - t0
+                debug_info['reranked_count'] = len(documents)
 
-        # Add metadata
-        output["pipeline_time"] = round(time.time() - start_time, 2)
-        output["num_retrieved"] = len(documents)
+        # Step 3: Fast relevance filtering
+        if self.relevance_filter and len(documents) > final_n:
+            t0 = time.time()
+            documents = self.relevance_filter.filter_relevant(
+                question,
+                documents,
+                max_docs=final_n
+            )
+            if debug:
+                debug_info['filter_time'] = time.time() - t0
+                debug_info['filtered_count'] = len(documents)
+
+        # Step 4: Generate answer with optimizations
+        t0 = time.time()
+        parsed_answer = self.generate_fast(question, documents)
+        generation_time = time.time() - t0
+
+        if debug:
+            debug_info['generation_time'] = generation_time
+            debug_info['final_count'] = len(documents)
+
+        pipeline_time = time.time() - start_time
+
+        # Calculate response length
+        response_length = sum(len(sent['text']) for sent in parsed_answer['answer'])
+
+        # Build response (Ragnarok-style format)
+        response = {
+            'question': question,
+            'answer': parsed_answer['answer'],  # List of sentences with citations
+            'references': parsed_answer['references'],  # List of cited documents
+            'response_length': response_length,
+            'pipeline_time': pipeline_time,
+            'num_retrieved': len(documents),
+            'pipeline_version': '1.0',
+        }
+
+        if debug:
+            response['debug_info'] = debug_info
 
         if return_documents:
-            output["documents"] = [
+            response['documents'] = [
                 {
-                    "id": doc.doc_id,
-                    "title": doc.title,
-                    "score": doc.score,
-                }
-                for doc in documents
+                    'pmcid': doc.pmcid,
+                    'title': doc.title,
+                    'abstract': doc.abstract
+                } for doc in documents
             ]
 
-        print(f"\nCompleted in {output['pipeline_time']:.2f}s\n")
+        return response
 
-        return output
+    def generate_fast(self, question: str, documents: List) -> Dict:
+        """Generate answer with fast optimizations and parse citations"""
 
+        # Build optimized context
+        context_parts = []
+        for i, doc in enumerate(documents):
+            # Truncate abstract if configured
+            abstract = doc.abstract
+            if self.config.truncate_abstracts:
+                abstract = abstract[:self.config.max_abstract_length]
+                if len(doc.abstract) > self.config.max_abstract_length:
+                    abstract += "..."
 
-def main():
-    """Example usage of complete RAG pipeline."""
-    import json
+            context_parts.append(
+                f"[{i}] PMC{doc.pmcid}: {doc.title}\n{abstract}"
+            )
 
-    # Create pipeline
-    config = RAGConfig(
-        retrieval_n=50,
-        rerank_n=10,
-        model_name="meta-llama/Llama-3.1-8B-Instruct",
-        load_in_4bit=True,
-    )
+        context = "\n\n".join(context_parts)
 
-    pipeline = RAGPipeline(config)
+        # Optimized prompt (shorter)
+        prompt = f"""Answer using context. Cite sources with [0], [1], etc. at the end of each sentence.
 
-    # Example questions
-    questions = [
-        "What is the host of Plasmodium falciparum?",
-        "What are the symptoms of malaria?",
-    ]
+Context:
+{context}
 
-    for i, question in enumerate(questions, 1):
-        print("=" * 80)
-        print(f"Question {i}/{len(questions)}")
-        print("=" * 80)
+Question: {question}
 
-        result = pipeline.run(question, topic_id=f"Q{i:03d}")
+Answer:"""
 
-        print("\nRESULT:")
-        print(json.dumps(result, indent=2))
-        print("\n")
+        # Generate with vLLM (fast settings)
+        sampling_params = SamplingParams(
+            temperature=self.config.temperature,
+            max_tokens=self.config.max_tokens,
+            top_p=0.9
+        )
 
+        outputs = self.llm.generate([prompt], sampling_params)
+        answer_text = outputs[0].outputs[0].text.strip()
 
-if __name__ == "__main__":
-    main()
+        # Parse answer into sentences with citations
+        parsed_answer = self._parse_answer_with_citations(answer_text, documents)
+
+        return parsed_answer
+
+    def _parse_answer_with_citations(self, answer_text: str, documents: List) -> Dict:
+        """Parse answer text into sentences with citation extraction"""
+        import re
+
+        # Split into sentences (simple split on period + space)
+        sentences = re.split(r'\.\s+', answer_text)
+
+        parsed_sentences = []
+        all_citation_ids = set()
+
+        for sentence in sentences:
+            if not sentence.strip():
+                continue
+
+            # Find citation markers like [0], [1], [0, 1], etc.
+            citation_pattern = r'\[(\d+(?:\s*,\s*\d+)*)\]'
+            citations_found = re.findall(citation_pattern, sentence)
+
+            # Extract unique citation IDs
+            citation_ids = []
+            for cite_group in citations_found:
+                ids = [int(x.strip()) for x in cite_group.split(',')]
+                citation_ids.extend(ids)
+
+            # Remove duplicates and sort
+            citation_ids = sorted(list(set(citation_ids)))
+            all_citation_ids.update(citation_ids)
+
+            # Build citation details
+            citation_details = []
+            for cid in citation_ids:
+                if cid < len(documents):
+                    doc = documents[cid]
+                    citation_details.append({
+                        'document_id': cid,
+                        'document_title': doc.title,
+                        'pmcid': f"PMC{doc.pmcid}"
+                    })
+
+            # Remove citation markers from text for clean display
+            clean_text = re.sub(citation_pattern, '', sentence).strip()
+
+            # Add period back if not present
+            if clean_text and not clean_text.endswith('.'):
+                clean_text += '.'
+
+            parsed_sentences.append({
+                'text': clean_text,
+                'citation_ids': citation_ids,
+                'citations': citation_details
+            })
+
+        # Build references list
+        references = []
+        for i, doc in enumerate(documents):
+            if i in all_citation_ids:
+                references.append(f"[{i}] PMC{doc.pmcid}: {doc.title}")
+
+        return {
+            'answer': parsed_sentences,
+            'references': references
+        }

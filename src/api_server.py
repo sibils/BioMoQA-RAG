@@ -1,18 +1,18 @@
 """
-FastAPI server for V3.2 RAG pipeline with SIBILS query parser integration.
+FastAPI server for BioMoQA RAG pipeline.
 """
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Dict
 
-from .pipeline_vllm_v3_fast import UltraFastRAGPipeline, RAGConfigV3Fast
+from .pipeline import RAGPipeline, RAGConfig
 
 # Initialize app
 app = FastAPI(
-    title="BioMoQA RAG API V3.2",
-    description="Biomedical QA with SIBILS query parser, hybrid retrieval, and sentence-level citations",
-    version="3.2.0"
+    title="BioMoQA RAG API",
+    description="Biomedical question answering with SIBILS retrieval and sentence-level citations",
+    version="1.0.0"
 )
 
 # Initialize pipeline (lazy loading)
@@ -23,8 +23,8 @@ def get_pipeline():
     """Lazy load pipeline"""
     global pipeline
     if pipeline is None:
-        print("Initializing V3.2 pipeline with query parser...")
-        config = RAGConfigV3Fast(
+        print("Initializing BioMoQA RAG pipeline...")
+        config = RAGConfig(
             retrieval_n=20,
             use_smart_retrieval=True,
             use_reranking=True,
@@ -32,10 +32,10 @@ def get_pipeline():
             max_tokens=384,
             truncate_abstracts=True,
             quantization=None,  # Disabled to avoid GPU memory issues
-            gpu_memory_utilization=0.4  # Reduced for MIG GPU (76GB available, need <40GB)
+            gpu_memory_utilization=0.4  # Reduced for MIG GPU
         )
-        pipeline = UltraFastRAGPipeline(config)
-        print("✓ V3.2 pipeline ready")
+        pipeline = RAGPipeline(config)
+        print("✓ Pipeline ready")
     return pipeline
 
 
@@ -79,7 +79,7 @@ class QuestionResponse(BaseModel):
 async def startup_event():
     """Initialize pipeline on startup"""
     print("="*80)
-    print("Starting BioMoQA RAG API V3.2")
+    print("Starting BioMoQA RAG API")
     print("="*80)
     get_pipeline()
 
@@ -89,17 +89,12 @@ async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "pipeline_version": "v3.2",
-        "optimizations": {
-            "query_parser_es_mode": True,
-            "concept_expansion": True,
-            "smart_hybrid_retrieval": True,
-            "parallel_execution": True,
+        "features": {
+            "hybrid_retrieval": True,
             "cross_encoder_reranking": True,
             "relevance_filtering": True,
             "sentence_citations": True
         },
-        "expected_speed": "~7s per question",
         "ready": pipeline is not None
     }
 
@@ -107,11 +102,10 @@ async def health_check():
 @app.post("/qa", response_model=QuestionResponse)
 async def answer_question(request: QuestionRequest):
     """
-    Answer a biomedical question using V3.2 ultra-fast RAG pipeline.
+    Answer a biomedical question using the RAG pipeline.
 
     Features:
-    - SIBILS query parser generates Elasticsearch queries with concept expansion
-    - Hybrid retrieval (Elasticsearch + Dense FAISS)
+    - Hybrid retrieval (SIBILS + Dense FAISS)
     - Cross-encoder reranking
     - Sentence-level citations
 
@@ -133,46 +127,6 @@ async def answer_question(request: QuestionRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/compare")
-async def compare_versions():
-    """Compare all versions"""
-    return {
-        "v1": {
-            "retrieval": "SIBILS BM25 only",
-            "quantization": "None",
-            "avg_time": "7.27s",
-            "speedup": "Baseline (24x vs original)",
-            "quality": "Good"
-        },
-        "v2": {
-            "retrieval": "SIBILS BM25 + multi-query",
-            "reranking": "Cross-encoder",
-            "quantization": "None",
-            "avg_time": "11.19s",
-            "speedup": "+54% slower than V1",
-            "quality": "Very Good"
-        },
-        "v3": {
-            "retrieval": "Parallel hybrid (SIBILS + Dense FAISS)",
-            "reranking": "Fast cross-encoder",
-            "quantization": "None",
-            "avg_time": "6.81s",
-            "speedup": "+39% faster than V2, +6% faster than V1",
-            "quality": "Very Good"
-        },
-        "v3.1": {
-            "retrieval": "Smart hybrid (adaptive SIBILS/Dense/Both)",
-            "reranking": "Fast cross-encoder",
-            "quantization": "FP8 (33% generation speedup)",
-            "context": "10 docs, truncated abstracts",
-            "avg_time": "5.20s",
-            "speedup": "+24% faster than V3, +54% faster than V2, +29% faster than V1",
-            "quality": "Very Good",
-            "gpu_memory": "8.1 GB (vs 14.2 GB)"
-        }
-    }
 
 
 @app.get("/retrieval-info")
@@ -225,14 +179,10 @@ async def root():
     """Root endpoint with API information"""
     return {
         "service": "BioMoQA RAG API",
-        "version": "3.1.0 (Ultra-Fast)",
-        "pipeline": "V3.1 with FP8 Quantization",
-        "speed": "~5.2s per question",
-        "retrieval": "Smart Hybrid (SIBILS + Dense FAISS)",
+        "description": "Biomedical question answering with SIBILS retrieval",
         "endpoints": {
             "/health": "Health check",
             "/qa": "Answer questions (POST)",
-            "/compare": "Compare all versions",
             "/retrieval-info": "Explain hybrid retrieval",
             "/docs": "API documentation"
         }
