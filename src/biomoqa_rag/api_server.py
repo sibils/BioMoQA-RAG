@@ -244,7 +244,7 @@ def main():
     logger.info(f"Starting server on {host}:{port} with {workers} worker(s)")
 
     uvicorn.run(
-        "src.api_server:app",
+        "src.biomoqa_rag.api_server:app",
         host=host,
         port=port,
         workers=workers,

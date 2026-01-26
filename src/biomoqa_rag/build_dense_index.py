@@ -9,8 +9,8 @@ This script:
 4. Saves index and documents to disk
 """
 
-from src.retrieval.sibils_retriever import SIBILSRetriever
-from src.retrieval.dense_retriever import DenseRetriever, Document
+from .retrieval.sibils_retriever import SIBILSRetriever
+from .retrieval.dense_retriever import DenseRetriever, Document
 from tqdm import tqdm
 import time
 
@@ -149,7 +149,7 @@ def main():
     print(f"Total documents: {len(documents)}")
     print()
     print("You can now use hybrid retrieval in your pipeline:")
-    print("  from src.retrieval.dense_retriever import DenseRetriever, HybridRetriever")
+    print("  from src.biomoqa_rag.retrieval.dense_retriever import DenseRetriever, HybridRetriever")
     print(f"  dense = DenseRetriever()")
     print(f"  dense.load('{index_path}', '{docs_path}')")
     print(f"  hybrid = HybridRetriever(sibils_retriever, dense, alpha=0.5)")
