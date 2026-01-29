@@ -31,6 +31,19 @@ use_smart_retrieval = true
 # Hybrid retrieval weight (0 = SIBILS only, 1 = FAISS only)
 hybrid_alpha = 0.5
 
+[sibils]
+# SIBILS search API endpoint
+search_api_url = "https://biodiversitypmc.sibils.org/api/search"
+
+# SIBILS query parser API endpoint
+query_parser_api_url = "https://biodiversitypmc.dev.sibils.org/api/query/parse"
+
+# Collection to search ("pmc", "medline", "plazi", "suppdata")
+collection = "pmc"
+
+# Request timeout in seconds
+timeout = 30
+
 [reranking]
 enabled = true
 model = "cross-encoder/ms-marco-MiniLM-L-6-v2"
