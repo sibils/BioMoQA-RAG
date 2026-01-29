@@ -14,7 +14,7 @@ mode = "gpu"
 size = "3b"
 
 # GPU settings
-gpu_memory_utilization = 0.8
+gpu_memory_utilization = 1
 quantization = "fp8"  # or null to disable
 
 [generation]
@@ -38,11 +38,6 @@ search_api_url = "https://biodiversitypmc.sibils.org/api/search"
 # SIBILS query parser API endpoint
 query_parser_api_url = "https://biodiversitypmc.dev.sibils.org/api/query/parse"
 
-# Collection to search ("pmc", "medline", "plazi", "suppdata")
-collection = "pmc"
-
-# Request timeout in seconds
-timeout = 30
 
 [reranking]
 enabled = true
