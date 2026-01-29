@@ -14,7 +14,7 @@ mode = "gpu"
 size = "3b"
 
 # GPU settings
-gpu_memory_utilization = 1
+gpu_memory_utilization = 0.89
 quantization = "fp8"  # or null to disable
 
 [generation]
