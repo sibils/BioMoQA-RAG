@@ -42,7 +42,7 @@ class SIBILSQueryParser:
     def __init__(
         self,
         api_url: str = "https://biodiversitypmc.dev.sibils.org/api/query/parse",
-        collection: str = "pmc",
+        collection: str = "medline",
         timeout: int = 10,
         cache_enabled: bool = True,
     ):
@@ -51,7 +51,7 @@ class SIBILSQueryParser:
 
         Args:
             api_url: SIBILS query parser API endpoint
-            collection: Target collection for ES query generation ("pmc", "medline", etc.)
+            collection: Target collection for ES query generation ("medline", "plazi", "pmc", etc.)
             timeout: Request timeout in seconds
             cache_enabled: Enable in-memory caching of parsed queries
         """

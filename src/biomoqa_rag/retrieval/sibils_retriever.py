@@ -38,18 +38,21 @@ class SIBILSRetriever:
     Retrieval module using SIBILS API.
 
     SIBILS provides access to:
-    - PMC (PubMed Central) full-text articles
-    - PubMed abstracts
+    - Medline (PubMed abstracts)
     - Plazi biodiversity treatments
+    - PMC (PubMed Central) full-text articles
     - Supplementary data
 
     Based on Ragnarok framework retrieval stage.
     """
 
+    # Valid collection names
+    VALID_COLLECTIONS = {"medline", "plazi", "pmc", "suppdata"}
+
     def __init__(
         self,
         api_url: str = "https://biodiversitypmc.sibils.org/api/search",
-        collection: str = "pmc",
+        collection: str | list[str] = None,
         default_n: int = 100,
         timeout: int = 30,
         use_query_parser: bool = True,
@@ -60,22 +63,28 @@ class SIBILSRetriever:
 
         Args:
             api_url: SIBILS API endpoint
-            collection: Collection to search ("pmc", "medline", "plazi", "suppdata")
+            collection: Collection(s) to search. A single string ("medline", "plazi",
+                        "pmc", "suppdata") or a list of collections.
+                        Defaults to ["medline", "plazi"].
             default_n: Default number of documents to retrieve
             timeout: Request timeout in seconds
             use_query_parser: Use SIBILS query parser to enhance queries
             use_es_query: Use Elasticsearch query (requires query parser)
         """
         self.api_url = api_url
-        self.collection = collection
+        if collection is None:
+            self.collection = ["medline", "plazi"]
+        else:
+            self.collection = collection
         self.default_n = default_n
         self.timeout = timeout
         self.use_query_parser = use_query_parser
         self.use_es_query = use_es_query and use_query_parser  # ES query requires parser
 
-        # Initialize query parser if enabled
+        # Initialize query parser if enabled (use first collection for ES query generation)
         if self.use_query_parser:
-            self.query_parser = SIBILSQueryParser(collection=collection)
+            first_col = self.collection[0] if isinstance(self.collection, list) else self.collection
+            self.query_parser = SIBILSQueryParser(collection=first_col)
         else:
             self.query_parser = None
 
@@ -83,26 +92,50 @@ class SIBILSRetriever:
         self,
         question: str,
         n: Optional[int] = None,
-        collection: Optional[str] = None,
+        collection: Optional[str | list[str]] = None,
     ) -> List[Document]:
         """
         Retrieve documents from SIBILS API.
 
-        If query parser is enabled, the question will be parsed first to:
-        - Annotate biomedical concepts (MeSH, NCIT, AGROVOC)
-        - Expand with ontology terms
-        - Generate optimized Elasticsearch query
+        When *collection* is a list, each collection is queried independently
+        and results are merged (deduplicated by doc_id, sorted by score).
 
         Args:
             question: User query/question
             n: Number of documents to retrieve (default: self.default_n)
-            collection: Override default collection
+            collection: Override default collection(s).
+                        A single string or a list of strings.
 
         Returns:
             List of Document objects sorted by relevance
         """
         n = n or self.default_n
         collection = collection or self.collection
+
+        # Multi-collection: query each and merge
+        if isinstance(collection, list):
+            all_docs: Dict[str, Document] = {}
+            for col in collection:
+                try:
+                    docs = self._retrieve_single(question, n, col)
+                    for doc in docs:
+                        # Keep higher-scored duplicate
+                        if doc.doc_id not in all_docs or doc.score > all_docs[doc.doc_id].score:
+                            all_docs[doc.doc_id] = doc
+                except Exception:
+                    # If one collection fails, continue with others
+                    continue
+            return sorted(all_docs.values(), key=lambda d: d.score, reverse=True)
+
+        return self._retrieve_single(question, n, collection)
+
+    def _retrieve_single(
+        self,
+        question: str,
+        n: int,
+        collection: str,
+    ) -> List[Document]:
+        """Retrieve documents from a single SIBILS collection."""
 
         # Parse query if enabled
         parsed_query = None
@@ -186,6 +219,7 @@ class SIBILSRetriever:
                     abstract=source.get("abstract", ""),
                     full_text=source.get("full_text"),
                     score=hit.get("_score", 0.0),
+                    source=collection,
                     pmid=source.get("pmid"),
                     pmcid=source.get("pmcid"),
                     doi=source.get("doi"),
@@ -224,18 +258,18 @@ class SIBILSRetriever:
 
 def main():
     """Example usage of SIBILS retriever."""
-    retriever = SIBILSRetriever()
+    retriever = SIBILSRetriever()  # defaults to ["medline", "plazi"]
 
     # Example question
     question = "What is the host of Plasmodium falciparum?"
     print(f"Question: {question}\n")
 
-    # Retrieve documents
+    # Retrieve documents (searches medline + plazi by default)
     documents = retriever.retrieve(question, n=5)
 
     print(f"Retrieved {len(documents)} documents:\n")
     for i, doc in enumerate(documents, 1):
-        print(f"{i}. [{doc.doc_id}] (score: {doc.score:.2f})")
+        print(f"{i}. [{doc.doc_id}] (score: {doc.score:.2f}, source: {doc.source})")
         print(f"   Title: {doc.title}")
         print(f"   Abstract: {doc.abstract[:200]}...")
         print()

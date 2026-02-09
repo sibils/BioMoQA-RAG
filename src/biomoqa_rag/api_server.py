@@ -5,7 +5,7 @@ Configuration is read from config.toml in the working directory.
 """
 
 import logging
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional, List, Dict
 
@@ -143,7 +143,14 @@ async def health_check():
 
 
 @app.post("/qa", response_model=QuestionResponse)
-async def answer_question(request: QuestionRequest):
+async def answer_question(
+    request: QuestionRequest,
+    col: Optional[str] = Query(
+        default=None,
+        description='SIBILS collection to search: "medline", "plazi", "pmc", or "suppdata". '
+                    'If omitted, searches both medline and plazi.',
+    ),
+):
     """
     Answer a biomedical question using the RAG pipeline.
 
@@ -152,9 +159,22 @@ async def answer_question(request: QuestionRequest):
     - Cross-encoder reranking
     - Sentence-level citations
 
+    Use the `col` query parameter to restrict retrieval to a single
+    SIBILS collection (e.g. `?col=plazi`).  When omitted the pipeline
+    searches **medline + plazi** by default.
+
     Returns:
         Answer with citations and metadata
     """
+    # Validate collection if provided
+    from .retrieval.sibils_retriever import SIBILSRetriever
+    if col is not None and col not in SIBILSRetriever.VALID_COLLECTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid collection '{col}'. "
+                   f"Valid values: {', '.join(sorted(SIBILSRetriever.VALID_COLLECTIONS))}",
+        )
+
     try:
         p = get_pipeline()
 
@@ -162,8 +182,9 @@ async def answer_question(request: QuestionRequest):
             question=request.question,
             retrieval_n=request.retrieval_n,
             final_n=request.final_n,
+            collection=col,
             return_documents=request.include_documents,
-            debug=request.debug
+            debug=request.debug,
         )
 
         return QuestionResponse(**result)

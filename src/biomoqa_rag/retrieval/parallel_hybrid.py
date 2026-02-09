@@ -3,7 +3,7 @@ Parallel hybrid retrieval for maximum speed.
 Runs BM25 and Dense retrieval in parallel threads.
 """
 
-from typing import List
+from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
@@ -73,7 +73,7 @@ class ParallelHybridRetriever:
 
         return results
 
-    def retrieve(self, query: str, n: int = 20, top_k: int = 20):
+    def retrieve(self, query: str, n: int = 20, top_k: int = 20, collection: Optional[str | list[str]] = None):
         """
         Retrieve documents using parallel hybrid approach.
 
@@ -81,6 +81,7 @@ class ParallelHybridRetriever:
             query: Search query
             n: Number of documents from each source
             top_k: Final number to return
+            collection: Override SIBILS collection(s)
 
         Returns:
             Top-k documents ranked by RRF
@@ -92,7 +93,7 @@ class ParallelHybridRetriever:
         # Run both retrievers in parallel
         with ThreadPoolExecutor(max_workers=2) as executor:
             # Submit both tasks
-            future_bm25 = executor.submit(self.sibils.retrieve, query, n)
+            future_bm25 = executor.submit(self.sibils.retrieve, query, n=n, collection=collection)
             future_dense = executor.submit(self.dense.retrieve, query, n)
 
             # Collect results
@@ -181,7 +182,7 @@ class SmartHybridRetriever:
         # Everything else -> Hybrid (best quality)
         return 'hybrid'
 
-    def retrieve(self, query: str, n: int = 20, top_k: int = 20):
+    def retrieve(self, query: str, n: int = 20, top_k: int = 20, collection: Optional[str | list[str]] = None):
         """
         Smart retrieval that chooses method based on query.
 
@@ -189,6 +190,7 @@ class SmartHybridRetriever:
             query: Search query
             n: Number of documents from each source
             top_k: Final number to return
+            collection: Override SIBILS collection(s)
 
         Returns:
             Top-k documents
@@ -197,7 +199,7 @@ class SmartHybridRetriever:
 
         if method == 'bm25':
             # Fast path: BM25 only
-            return self.sibils.retrieve(query, n=top_k)
+            return self.sibils.retrieve(query, n=top_k, collection=collection)
 
         elif method == 'dense':
             # Fastest path: Dense only
@@ -205,4 +207,4 @@ class SmartHybridRetriever:
 
         else:
             # Best quality: Parallel hybrid
-            return self.parallel.retrieve(query, n=n, top_k=top_k)
+            return self.parallel.retrieve(query, n=n, top_k=top_k, collection=collection)

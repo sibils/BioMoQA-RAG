@@ -225,6 +225,7 @@ class RAGPipeline:
         question: str,
         retrieval_n: Optional[int] = None,
         final_n: Optional[int] = None,
+        collection: Optional[str] = None,
         return_documents: bool = False,
         debug: bool = False
     ) -> Dict:
@@ -235,6 +236,8 @@ class RAGPipeline:
             question: User question
             retrieval_n: Override retrieval count
             final_n: Override final document count
+            collection: Override SIBILS collection ("medline", "plazi", etc.).
+                        If None, uses default (medline + plazi).
             return_documents: Include documents in response
             debug: Include debug information
 
@@ -252,7 +255,8 @@ class RAGPipeline:
         documents = self.retriever.retrieve(
             question,
             n=retrieval_n,
-            top_k=retrieval_n
+            top_k=retrieval_n,
+            collection=collection,
         )
         retrieval_time = time.time() - t0
 
@@ -331,13 +335,28 @@ class RAGPipeline:
         if return_documents:
             response['documents'] = [
                 {
-                    'pmcid': doc.pmcid,
+                    'ref': self._format_doc_ref(doc),
+                    'source': doc.source,
                     'title': doc.title,
-                    'abstract': doc.abstract
+                    'abstract': doc.abstract,
+                    'pmid': doc.pmid,
+                    'pmcid': doc.pmcid,
+                    'doi': doc.doi,
                 } for doc in documents
             ]
 
         return response
+
+    @staticmethod
+    def _format_doc_ref(doc) -> str:
+        """Format a human-readable reference identifier for a document."""
+        if doc.pmcid:
+            return f"PMC{doc.pmcid}"
+        if doc.pmid:
+            return f"PMID:{doc.pmid}"
+        if doc.doi:
+            return f"doi:{doc.doi}"
+        return doc.doc_id
 
     def generate_fast(self, question: str, documents: List) -> Dict:
         """Generate answer with fast optimizations and parse citations"""
@@ -352,8 +371,9 @@ class RAGPipeline:
                 if len(doc.abstract) > self.config.max_abstract_length:
                     abstract += "..."
 
+            doc_ref = self._format_doc_ref(doc)
             context_parts.append(
-                f"[{i}] PMC{doc.pmcid}: {doc.title}\n{abstract}"
+                f"[{i}] {doc_ref}: {doc.title}\n{abstract}"
             )
 
         context = "\n\n".join(context_parts)
@@ -476,7 +496,7 @@ Answer:"""
                     citation_details.append({
                         'document_id': cid,
                         'document_title': doc.title,
-                        'pmcid': f"PMC{doc.pmcid}"
+                        'pmcid': self._format_doc_ref(doc),
                     })
 
             # Remove citation markers from text for clean display
@@ -496,7 +516,8 @@ Answer:"""
         references = []
         for i, doc in enumerate(documents):
             if i in all_citation_ids:
-                references.append(f"[{i}] PMC{doc.pmcid}: {doc.title}")
+                doc_ref = self._format_doc_ref(doc)
+                references.append(f"[{i}] {doc_ref}: {doc.title}")
 
         return {
             'answer': parsed_sentences,
