@@ -23,13 +23,13 @@ This system answers biomedical questions by:
 ### Running the API
 
 ```bash
-# API is already running on http://172.30.120.7:9000
+# API is already running on http://sibils-prod-ai.lan.text-analytics.ch:9000
 
 # Check health
-curl http://172.30.120.7:9000/health
+curl http://sibils-prod-ai.lan.text-analytics.ch:9000/health
 
 # Ask a question
-curl -X POST http://172.30.120.7:9000/qa \
+curl -X POST http://sibils-prod-ai.lan.text-analytics.ch:9000/qa \
   -H "Content-Type: application/json" \
   -d '{"question": "What causes malaria?"}'
 ```
