@@ -125,7 +125,7 @@ log_level = "info"
 [model]
 mode = "gpu"        # "gpu", "gpu_small", or "cpu"
 size = "3b"         # "0.5b", "1.5b", "3b", "7b"
-gpu_memory_utilization = 0.8
+gpu_memory_utilization = 0.83  # Uses full 20GB GPU allocation on HULK VM (sibils-prod-ai)
 quantization = "fp8"
 
 [generation]

@@ -32,7 +32,7 @@ biomoqa_mode: "gpu"
 biomoqa_model_size: "3b"
 
 # GPU settings
-biomoqa_gpu_memory_utilization: 0.8
+biomoqa_gpu_memory_utilization: 0.83
 biomoqa_quantization: "fp8"  # Set to null/empty to disable
 
 # ============================================

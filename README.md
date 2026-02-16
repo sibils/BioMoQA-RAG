@@ -180,13 +180,14 @@ config = RAGConfigV3Fast(
     use_smart_retrieval=True,    # Adaptive strategy
     use_reranking=True,          # Cross-encoder
     final_n=10,                  # Final context size
-    gpu_memory_utilization=0.4   # GPU memory (adjust as needed)
+    gpu_memory_utilization=0.83  # GPU memory (0.83 = full 20GB on HULK VM)
 )
 ```
 
 ## Performance Tips
 
 ### GPU Memory
+- **HULK VM (sibils-prod-ai)**: Use 0.83 (20GB allocated)
 - **MIG GPUs**: Use 0.4 (< 40GB)
 - **Full A100**: Use 0.8 (< 64GB)
 

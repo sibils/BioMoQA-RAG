@@ -4,6 +4,11 @@ FastAPI server for BioMoQA RAG pipeline.
 Configuration is read from config.toml in the working directory.
 """
 
+# Must be set before any CUDA initialization (e.g. SentenceTransformer)
+# so that vLLM workers can spawn correctly.
+import multiprocessing
+multiprocessing.set_start_method("spawn", force=True)
+
 import logging
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
@@ -17,7 +22,7 @@ config = get_config()
 
 # Configure logging
 logging.basicConfig(
-    level=getattr(logging, config.get("server", "log_level", default="info").upper()),
+    level=getattr(logging, config.server.log_level.upper()),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger("biomoqa")
@@ -39,8 +44,8 @@ def get_pipeline():
     if pipeline is None:
         logger.info("Initializing BioMoQA RAG pipeline...")
 
-        mode = config.get("model", "mode", default="gpu")
-        model_size = config.get("model", "size", default="3b")
+        mode = config.model.mode
+        model_size = config.model.size
 
         if mode == "cpu":
             logger.info(f"Mode: CPU inference, model size: {model_size}")
@@ -51,20 +56,20 @@ def get_pipeline():
         else:
             logger.info("Mode: GPU (default)")
             rag_config = RAGConfig(
-                retrieval_n=config.get("retrieval", "retrieval_n", default=20),
-                use_smart_retrieval=config.get("retrieval", "use_smart_retrieval", default=True),
-                hybrid_alpha=config.get("retrieval", "hybrid_alpha", default=0.5),
-                use_reranking=config.get("reranking", "enabled", default=True),
-                reranker_model=config.get("reranking", "model", default="cross-encoder/ms-marco-MiniLM-L-6-v2"),
-                rerank_n=config.get("reranking", "top_k", default=15),
-                use_relevance_filter=config.get("relevance_filter", "enabled", default=True),
-                final_n=config.get("relevance_filter", "final_n", default=10),
-                max_tokens=config.get("generation", "max_tokens", default=384),
-                temperature=config.get("generation", "temperature", default=0.1),
-                max_abstract_length=config.get("context", "max_abstract_length", default=800),
-                truncate_abstracts=config.get("context", "truncate_abstracts", default=True),
-                quantization=config.get("model", "quantization", default="fp8"),
-                gpu_memory_utilization=config.get("model", "gpu_memory_utilization", default=0.8),
+                retrieval_n=config.retrieval.retrieval_n,
+                use_smart_retrieval=config.retrieval.use_smart_retrieval,
+                hybrid_alpha=config.retrieval.hybrid_alpha,
+                use_reranking=config.reranking.enabled,
+                reranker_model=config.reranking.model,
+                rerank_n=config.reranking.top_k,
+                use_relevance_filter=config.relevance_filter.enabled,
+                final_n=config.relevance_filter.final_n,
+                max_tokens=config.generation.max_tokens,
+                temperature=config.generation.temperature,
+                max_abstract_length=config.context.max_abstract_length,
+                truncate_abstracts=config.context.truncate_abstracts,
+                quantization=config.model.quantization,
+                gpu_memory_utilization=config.model.gpu_memory_utilization,
             )
 
         pipeline = RAGPipeline(rag_config)
@@ -109,7 +114,7 @@ class QuestionResponse(BaseModel):
 
 
 @app.on_event("startup")
-async def startup_event():
+def startup_event():
     """Initialize pipeline on startup"""
     logger.info("=" * 60)
     logger.info("Starting BioMoQA RAG API")
@@ -118,7 +123,7 @@ async def startup_event():
 
 
 @app.get("/health")
-async def health_check():
+def health_check():
     """Health check endpoint"""
     config_info = {}
     if pipeline is not None:
@@ -143,7 +148,7 @@ async def health_check():
 
 
 @app.post("/qa", response_model=QuestionResponse)
-async def answer_question(
+def answer_question(
     request: QuestionRequest,
     col: Optional[str] = Query(
         default=None,
@@ -194,7 +199,7 @@ async def answer_question(
 
 
 @app.get("/retrieval-info")
-async def retrieval_info():
+def retrieval_info():
     """Explain the hybrid retrieval system"""
     return {
         "hybrid_retrieval": {
@@ -239,7 +244,7 @@ async def retrieval_info():
 
 
 @app.get("/")
-async def root():
+def root():
     """Root endpoint with API information"""
     return {
         "service": "BioMoQA RAG API",
@@ -257,10 +262,10 @@ def main():
     """Entry point for the BioMoQA API server."""
     import uvicorn
 
-    host = config.get("server", "host", default="0.0.0.0")
-    port = config.get("server", "port", default=9000)
-    workers = config.get("server", "workers", default=1)
-    log_level = config.get("server", "log_level", default="info").lower()
+    host = config.server.host
+    port = config.server.port
+    workers = config.server.workers
+    log_level = config.server.log_level.lower()
 
     logger.info(f"Starting server on {host}:{port} with {workers} worker(s)")
 

@@ -53,7 +53,7 @@ class RAGConfig:
     use_vllm: bool = True
     use_cpu: bool = False  # Use CPU inference with transformers instead of vLLM
     quantization: Optional[str] = "fp8"  # FP8 quantization (GPU only)
-    gpu_memory_utilization: float = 0.8
+    gpu_memory_utilization: float = 0.83
     max_tokens: int = 384  # Reduced from 512
     temperature: float = 0.1
 
@@ -95,7 +95,7 @@ class RAGConfig:
             use_vllm=True,
             use_cpu=False,
             quantization="fp8",
-            gpu_memory_utilization=0.8,
+            gpu_memory_utilization=0.83,
             max_tokens=384,
         )
 

@@ -1,103 +1,98 @@
 """
 Configuration management for BioMoQA RAG.
 
-Reads configuration from config.toml file.
+Uses Pydantic BaseModel to validate and type-check config.toml values.
 """
 
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import List, Optional
 
-# Use tomllib (Python 3.11+) or tomli (Python 3.9-3.10)
+from pydantic import BaseModel
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
     import tomli as tomllib
 
 
-class Config:
-    """Configuration loaded from config.toml."""
+class ServerConfig(BaseModel):
+    host: str = "0.0.0.0"
+    port: int = 9000
+    workers: int = 1
+    log_level: str = "info"
 
-    _instance: Optional["Config"] = None
-    _config: dict = {}
 
-    def __new__(cls, config_path: Optional[str] = None):
-        """Singleton pattern - only load config once."""
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._load(config_path)
-        return cls._instance
+class ModelConfig(BaseModel):
+    mode: str = "gpu"
+    size: str = "3b"
+    gpu_memory_utilization: float = 0.83
+    quantization: Optional[str] = "fp8"
 
-    def _load(self, config_path: Optional[str] = None):
-        """Load configuration from TOML file."""
-        if config_path:
-            path = Path(config_path)
-        else:
-            # Default: ./config.toml
-            path = Path("config.toml")
 
-        if not path.exists():
-            raise FileNotFoundError(f"Configuration file not found: {path}")
+class GenerationConfig(BaseModel):
+    max_tokens: int = 384
+    temperature: float = 0.1
 
-        with open(path, "rb") as f:
-            self._config = tomllib.load(f)
 
-    def get(self, *keys: str, default: Any = None) -> Any:
-        """Get a nested config value using dot notation or multiple keys.
+class RetrievalConfig(BaseModel):
+    retrieval_n: int = 20
+    use_smart_retrieval: bool = True
+    hybrid_alpha: float = 0.5
 
-        Examples:
-            config.get("server", "port")  # -> 9000
-            config.get("model", "mode")   # -> "gpu"
-        """
-        value = self._config
-        for key in keys:
-            if isinstance(value, dict) and key in value:
-                value = value[key]
-            else:
-                return default
-        return value
 
-    @property
-    def server(self) -> dict:
-        """Server configuration."""
-        return self._config.get("server", {})
+class SibilsConfig(BaseModel):
+    search_api_url: str = "https://biodiversitypmc.sibils.org/api/search"
+    query_parser_api_url: str = "https://biodiversitypmc.dev.sibils.org/api/query/parse"
+    collections: List[str] = ["medline", "plazi"]
+    user_agent: str = "BioMoQA-RAG/1.0 (https://github.com/sibils/BioMoQA-RAG)"
 
-    @property
-    def model(self) -> dict:
-        """Model configuration."""
-        return self._config.get("model", {})
 
-    @property
-    def generation(self) -> dict:
-        """Generation configuration."""
-        return self._config.get("generation", {})
+class RerankingConfig(BaseModel):
+    enabled: bool = True
+    model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    top_k: int = 15
 
-    @property
-    def retrieval(self) -> dict:
-        """Retrieval configuration."""
-        return self._config.get("retrieval", {})
 
-    @property
-    def reranking(self) -> dict:
-        """Reranking configuration."""
-        return self._config.get("reranking", {})
+class RelevanceFilterConfig(BaseModel):
+    enabled: bool = True
+    min_overlap: float = 0.15
+    final_n: int = 10
 
-    @property
-    def relevance_filter(self) -> dict:
-        """Relevance filter configuration."""
-        return self._config.get("relevance_filter", {})
 
-    @property
-    def context(self) -> dict:
-        """Context configuration."""
-        return self._config.get("context", {})
+class ContextConfig(BaseModel):
+    max_abstract_length: int = 800
+    truncate_abstracts: bool = True
 
-    @property
-    def data(self) -> dict:
-        """Data paths configuration."""
-        return self._config.get("data", {})
+
+class DataConfig(BaseModel):
+    faiss_index: str = "data/faiss_index.bin"
+    documents: str = "data/documents.pkl"
+
+
+class Config(BaseModel):
+    server: ServerConfig = ServerConfig()
+    model: ModelConfig = ModelConfig()
+    generation: GenerationConfig = GenerationConfig()
+    retrieval: RetrievalConfig = RetrievalConfig()
+    sibils: SibilsConfig = SibilsConfig()
+    reranking: RerankingConfig = RerankingConfig()
+    relevance_filter: RelevanceFilterConfig = RelevanceFilterConfig()
+    context: ContextConfig = ContextConfig()
+    data: DataConfig = DataConfig()
+
+
+_config: Optional[Config] = None
 
 
 def get_config(config_path: Optional[str] = None) -> Config:
-    """Get the configuration singleton."""
-    return Config(config_path)
+    """Load and return the configuration singleton."""
+    global _config
+    if _config is None:
+        path = Path(config_path) if config_path else Path("config.toml")
+        if not path.exists():
+            raise FileNotFoundError(f"Configuration file not found: {path}")
+        with open(path, "rb") as f:
+            raw = tomllib.load(f)
+        _config = Config(**raw)
+    return _config
