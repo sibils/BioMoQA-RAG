@@ -100,11 +100,35 @@ curl -X POST http://sibils-prod-ai.lan.text-analytics.ch:9000/qa \
 
 Or open the Swagger UI: http://sibils-prod-ai.lan.text-analytics.ch:9000/docs
 
+## GPU / MIG configuration
+
+The VM uses an **NVIDIA A100 in MIG mode** (1g.20GB partition). In CUDA 12+, if
+`CUDA_VISIBLE_DEVICES` is not set, `cuda:0` maps to the physical GPU which is
+inaccessible in MIG mode → `RuntimeError: CUDA driver error: operation not supported`.
+
+The MIG instance UUID (get it with `nvidia-smi -L`):
+```
+MIG-6238f33e-8323-510c-9388-bddb60a893d5
+```
+
+The systemd service file in the **ansible-cfg repo** must contain:
+```ini
+Environment="CUDA_VISIBLE_DEVICES=MIG-6238f33e-8323-510c-9388-bddb60a893d5"
+```
+
+To verify before redeploying:
+```bash
+CUDA_VISIBLE_DEVICES="MIG-6238f33e-8323-510c-9388-bddb60a893d5" \
+  /opt/sibils-qa/venv/bin/python3 -c \
+  "import torch; t = torch.zeros(1, device='cuda'); print('CUDA works:', t)"
+```
+
 ## Troubleshooting
 
 | Issue | Fix |
 |-------|-----|
-| CUDA spawn warning | `multiprocessing.set_start_method("spawn")` is set in api_server.py |
+| `CUDA driver error: operation not supported` | Set `CUDA_VISIBLE_DEVICES=MIG-<UUID>` in service file (see above) |
+| vLLM EngineCore subprocess fails | `VLLM_ENABLE_V1_MULTIPROCESSING=0` is set in api_server.py |
 | Out of GPU memory | Lower `gpu_memory_utilization` in config.toml (current: 0.83) |
 | Service keeps crashing | Check `journalctl -fu sibils-qa` for errors |
 | Config change not applied | Did you update the config.toml in **ansible-cfg repo** (not this repo)? |
