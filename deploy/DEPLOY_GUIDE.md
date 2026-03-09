@@ -56,16 +56,34 @@ This runs the Ansible playbook which:
 
 ## Step 4: Verify on the VM
 
+### Connect
+
 ```bash
-ssh esteban@sibils-prod-ai
-sudo -s
-systemctl status sibils-qa*
+ssh sibils-prod-ai.lan.text-analytics.ch   # connect to VM
+sudo -s                                     # become root (enter your password)
 ```
 
-Check the logs if something goes wrong:
+### Service management
 
 ```bash
-journalctl -fu sibils-qa
+systemctl status sibils-qa*    # check if service is running
+systemctl start sibils-qa      # start the service
+systemctl stop sibils-qa       # stop the service
+systemctl restart sibils-qa    # restart (e.g. after config change)
+```
+
+### Logs
+
+```bash
+journalctl -fu sibils-qa                        # follow live logs
+journalctl -u sibils-qa --since "10 min ago"    # last 10 minutes only
+```
+
+### Switch to the service user
+
+```bash
+su sibils-qa -l    # switch to the sibils-qa system user (runs the service)
+                   # useful to manually test commands as that user
 ```
 
 ## Step 5: Test the API
