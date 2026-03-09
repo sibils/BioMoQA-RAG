@@ -4,8 +4,12 @@ FastAPI server for BioMoQA RAG pipeline.
 Configuration is read from config.toml in the working directory.
 """
 
-# Must be set before any CUDA initialization (e.g. SentenceTransformer)
-# so that vLLM workers can spawn correctly.
+# Must be set before any CUDA/vLLM initialization.
+# VLLM_USE_V1=0 disables the V1 engine which spawns a subprocess for CUDA
+# that fails on this VM's CUDA driver ("operation not supported").
+import os
+os.environ["VLLM_USE_V1"] = "0"
+
 import multiprocessing
 multiprocessing.set_start_method("spawn", force=True)
 
