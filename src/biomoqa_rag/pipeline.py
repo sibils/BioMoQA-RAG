@@ -37,7 +37,7 @@ from .retrieval.relevance_filter import FastRelevanceFilter
 class RAGConfig:
     """Configuration for the RAG pipeline"""
     # Retrieval
-    retrieval_n: int = 20
+    retrieval_n: int = 15
     use_smart_retrieval: bool = True
     hybrid_alpha: float = 0.5
 
@@ -46,7 +46,7 @@ class RAGConfig:
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     rerank_n: int = 15
     use_relevance_filter: bool = True
-    final_n: int = 10  # Reduced from 15
+    final_n: int = 5
 
     # Generation (optimized)
     model_name: str = "Qwen/Qwen2.5-3B-Instruct"  # Default to 3B (~6GB VRAM)

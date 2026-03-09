@@ -82,7 +82,7 @@ class QuestionRequest(BaseModel):
     question: str
     retrieval_n: Optional[int] = None
     final_n: Optional[int] = None
-    include_documents: bool = False
+    include_documents: bool = True
     debug: bool = False
 
 

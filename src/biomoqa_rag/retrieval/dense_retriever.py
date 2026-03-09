@@ -41,7 +41,7 @@ class DenseRetriever:
             index_path: Path to saved FAISS index
             documents_path: Path to saved documents
         """
-        self.model = SentenceTransformer(model_name)
+        self.model = SentenceTransformer(model_name, device="cpu")
         self.index = None
         self.documents = []
 

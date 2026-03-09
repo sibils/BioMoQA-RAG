@@ -36,7 +36,7 @@ class GenerationConfig(BaseModel):
 
 
 class RetrievalConfig(BaseModel):
-    retrieval_n: int = 20
+    retrieval_n: int = 15
     use_smart_retrieval: bool = True
     hybrid_alpha: float = 0.5
 
@@ -57,7 +57,7 @@ class RerankingConfig(BaseModel):
 class RelevanceFilterConfig(BaseModel):
     enabled: bool = True
     min_overlap: float = 0.15
-    final_n: int = 10
+    final_n: int = 5
 
 
 class ContextConfig(BaseModel):
