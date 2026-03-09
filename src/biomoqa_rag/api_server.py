@@ -5,10 +5,12 @@ Configuration is read from config.toml in the working directory.
 """
 
 # Must be set before any CUDA/vLLM initialization.
-# VLLM_USE_V1=0 disables the V1 engine which spawns a subprocess for CUDA
-# that fails on this VM's CUDA driver ("operation not supported").
+# VLLM_ENABLE_V1_MULTIPROCESSING=0 keeps EngineCore in the same process.
+# The V1 engine (default in vLLM >=0.7) otherwise spawns a subprocess for CUDA
+# which fails on this VM's CUDA driver ("operation not supported").
+# VLLM_USE_V1 was removed in vLLM >=0.9 — use VLLM_ENABLE_V1_MULTIPROCESSING instead.
 import os
-os.environ["VLLM_USE_V1"] = "0"
+os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 import multiprocessing
 multiprocessing.set_start_method("spawn", force=True)
