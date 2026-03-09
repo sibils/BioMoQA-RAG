@@ -15,14 +15,19 @@ os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 import multiprocessing
 multiprocessing.set_start_method("spawn", force=True)
 
-# MIG GPU workaround: on sibils-prod-ai the A100 runs in MIG mode.
-# CUDA_VISIBLE_DEVICES must be the MIG UUID so cuda:0 maps to the MIG partition,
-# but vLLM 0.17 tries to int() it during config creation and fails.
-# Fix: initialize the CUDA context with the MIG UUID first (establishing the
-# device mapping), then reset CUDA_VISIBLE_DEVICES to "0" so vLLM can parse it.
-# CUDA keeps the context bound to the MIG device for the lifetime of the process.
+# MIG / vGPU workaround for sibils-prod-ai (GRID A100D-1-20C in MIG mode):
+#
+# 1. CUDA_VISIBLE_DEVICES must be the MIG UUID so cuda:0 maps to the MIG partition.
+#    But vLLM 0.17 tries to int() that string during config creation → pydantic error.
+#    Fix: warm-up CUDA with the UUID first, then reset to "0" (vLLM-parseable).
+#    CUDA keeps the context bound to the MIG device for the process lifetime.
+#
+# 2. PyTorch 2.4+ enables expandable_segments (VMM via cuMemCreate) by default.
+#    VMM is NOT supported on NVIDIA vGPU/GRID → "CUDA driver error: operation not supported".
+#    Fix: disable expandable_segments before the first CUDA call.
 _cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
 if _cuda_vis.startswith("MIG-"):
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:False")
     import torch
     torch.zeros(1, device="cuda:0")  # init CUDA context with MIG partition
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # reset to numeric for vLLM config
