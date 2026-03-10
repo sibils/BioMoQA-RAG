@@ -11,54 +11,35 @@ This script:
 
 from .retrieval.sibils_retriever import SIBILSRetriever
 from .retrieval.dense_retriever import DenseRetriever, Document
+from pathlib import Path
 from tqdm import tqdm
 import time
+
+SEED_QUERIES_FILE = Path(__file__).parent.parent.parent / "data" / "seed_queries.txt"
+
+
+def load_seed_queries(path: Path = SEED_QUERIES_FILE):
+    """Load seed queries from file, ignoring blank lines and comments (#)."""
+    queries = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                queries.append(line)
+    return queries
+
 
 def build_biomedical_corpus():
     """
     Build a corpus by querying SIBILS with broad biomedical terms.
 
-    We query multiple broad topics to get diverse coverage of the
-    biomedical literature in SIBILS.
+    Queries are loaded from data/seed_queries.txt so they can be
+    edited without touching the code.
     """
     retriever = SIBILSRetriever()
 
-    # Broad biomedical query terms to build corpus
-    seed_queries = [
-        # Diseases
-        "cancer tumor malignancy",
-        "infection pathogen bacteria virus",
-        "diabetes metabolic disease",
-        "cardiovascular heart disease",
-        "neurological brain disease",
-        "autoimmune inflammatory disease",
-
-        # Organisms
-        "bacteria microbiome",
-        "virus viral infection",
-        "fungi fungal",
-        "parasite parasitic",
-        "Plasmodium malaria",
-        "Escherichia coli",
-
-        # Molecular biology
-        "protein gene expression",
-        "DNA RNA sequencing",
-        "enzyme catalysis",
-        "cell signaling pathway",
-        "immune response",
-
-        # Methods
-        "clinical trial treatment",
-        "diagnostic test",
-        "vaccine immunization",
-        "drug therapy",
-
-        # General
-        "biomedical research",
-        "molecular mechanism",
-        "pathogenesis",
-    ]
+    seed_queries = load_seed_queries()
+    print(f"Loaded {len(seed_queries)} seed queries from {SEED_QUERIES_FILE}")
 
     print(f"Building corpus from {len(seed_queries)} seed queries...")
     print("This will take approximately 5-10 minutes...")
