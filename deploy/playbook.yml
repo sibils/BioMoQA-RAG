@@ -63,6 +63,15 @@
         {{ ansible_env.HOME }}/.local/bin/uv sync
       become: false
 
+    - name: Deploy seed_queries.txt
+      get_url:
+        url: "https://raw.githubusercontent.com/sibils/BioMoQA-RAG/master/data/seed_queries.txt"
+        dest: "{{ biomoqa_install_dir }}/data/seed_queries.txt"
+        owner: "{{ biomoqa_user }}"
+        group: "{{ biomoqa_group }}"
+        mode: "0644"
+        force: true  # always fetch latest version
+
     - name: Copy FAISS index files
       copy:
         src: "{{ item }}"
