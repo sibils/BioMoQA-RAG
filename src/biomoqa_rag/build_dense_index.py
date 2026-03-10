@@ -15,7 +15,7 @@ from pathlib import Path
 from tqdm import tqdm
 import time
 
-SEED_QUERIES_FILE = Path(__file__).parent.parent.parent / "data" / "seed_queries.txt"
+SEED_QUERIES_FILE = Path.cwd() / "data" / "seed_queries.txt"
 
 
 def load_seed_queries(path: Path = SEED_QUERIES_FILE):
