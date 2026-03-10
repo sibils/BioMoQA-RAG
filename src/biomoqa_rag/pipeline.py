@@ -350,13 +350,13 @@ class RAGPipeline:
     @staticmethod
     def _format_doc_ref(doc) -> str:
         """Format a human-readable reference identifier for a document."""
-        if doc.pmcid:
+        if getattr(doc, 'pmcid', None):
             return f"PMC{doc.pmcid}"
-        if doc.pmid:
+        if getattr(doc, 'pmid', None):
             return f"PMID:{doc.pmid}"
-        if doc.doi:
+        if getattr(doc, 'doi', None):
             return f"doi:{doc.doi}"
-        return doc.doc_id
+        return getattr(doc, 'doc_id', getattr(doc, 'pmcid', 'unknown'))
 
     def generate_fast(self, question: str, documents: List) -> Dict:
         """Generate answer with fast optimizations and parse citations"""
