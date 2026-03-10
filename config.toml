@@ -10,8 +10,11 @@ log_level = "info"
 # Inference mode: "gpu", "gpu_small", or "cpu"
 mode = "gpu"
 
+# Model name for GPU mode (Qwen3-8B fits in 20GB MIG with fp8, ~8GB weights)
+model_name = "Qwen/Qwen3-8B"
+
 # Model size for CPU mode: "0.5b", "1.5b", "3b", "7b"
-size = "3b"
+size = "8b"
 
 # GPU settings
 gpu_memory_utilization = 0.83

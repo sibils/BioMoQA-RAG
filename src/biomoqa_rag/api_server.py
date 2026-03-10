@@ -77,8 +77,9 @@ def get_pipeline():
             logger.info("Mode: GPU (small model, ~8GB VRAM)")
             rag_config = RAGConfig.gpu_small_config()
         else:
-            logger.info("Mode: GPU (default)")
+            logger.info(f"Mode: GPU (default), model: {config.model.model_name}")
             rag_config = RAGConfig(
+                model_name=config.model.model_name,
                 retrieval_n=config.retrieval.retrieval_n,
                 use_smart_retrieval=config.retrieval.use_smart_retrieval,
                 hybrid_alpha=config.retrieval.hybrid_alpha,
@@ -107,6 +108,7 @@ class QuestionRequest(BaseModel):
     final_n: Optional[int] = None      # None = use config default (5)
     include_documents: bool = True
     debug: bool = False
+    mode: str = "hybrid"  # "hybrid" (default), "extractive", or "generative"
 
     model_config = {"json_schema_extra": {"example": {
         "question": "What causes malaria?",
@@ -114,6 +116,7 @@ class QuestionRequest(BaseModel):
         "final_n": 5,
         "include_documents": True,
         "debug": False,
+        "mode": "hybrid",
     }}}
 
 
@@ -140,6 +143,7 @@ class QuestionResponse(BaseModel):
     pipeline_time: float
     num_retrieved: int
     pipeline_version: str
+    mode_used: Optional[str] = None  # e.g. "hybrid:extractive", "hybrid:generative", "extractive", "generative"
     debug_info: Optional[Dict] = None
     documents: Optional[List[Dict]] = None
 
@@ -159,7 +163,8 @@ def health_check():
     config_info = {}
     if pipeline is not None:
         config_info = {
-            "model": pipeline.config.model_name,
+            "generative_model": pipeline.config.model_name,
+            "extractive_model": pipeline.config.qa_model,
             "inference_mode": "cpu" if pipeline.config.use_cpu else "gpu",
             "use_vllm": pipeline.config.use_vllm,
         }
@@ -199,6 +204,15 @@ def answer_question(
     SIBILS collection (e.g. `?col=plazi`).  When omitted the pipeline
     searches **medline + plazi** by default.
 
+    Set `mode` in the request body to switch answer strategy:
+    - `"hybrid"` (default): extractive span first (no hallucination); falls back
+      to LLM synthesis when BioBERT confidence is too low
+    - `"extractive"`: verbatim span only — returns "no answer" if not confident
+    - `"generative"`: LLM always synthesises a multi-sentence answer
+
+    The response includes `mode_used` indicating which branch ran
+    (`"hybrid:extractive"`, `"hybrid:generative"`, `"extractive"`, or `"generative"`).
+
     Returns:
         Answer with citations and metadata
     """
@@ -221,6 +235,7 @@ def answer_question(
             collection=col,
             return_documents=request.include_documents,
             debug=request.debug,
+            mode=request.mode,
         )
 
         return QuestionResponse(**result)

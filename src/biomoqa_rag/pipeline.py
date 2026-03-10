@@ -49,17 +49,22 @@ class RAGConfig:
     final_n: int = 5
 
     # Generation (optimized)
-    model_name: str = "Qwen/Qwen2.5-3B-Instruct"  # Default to 3B (~6GB VRAM)
+    model_name: str = "Qwen/Qwen3-8B"  # Qwen3-8B (~8GB VRAM with fp8)
     use_vllm: bool = True
     use_cpu: bool = False  # Use CPU inference with transformers instead of vLLM
     quantization: Optional[str] = "fp8"  # FP8 quantization (GPU only)
     gpu_memory_utilization: float = 0.83
-    max_tokens: int = 384  # Reduced from 512
+    max_tokens: int = 384
     temperature: float = 0.1
 
     # Context optimization
     max_abstract_length: int = 800  # ~200 words
     truncate_abstracts: bool = True
+
+    # Extractive QA (optional mode — lazy-loaded on first use)
+    qa_model: str = "ktrapeznikov/biobert_v1.1_pubmed_squad_v2"
+    qa_confidence_threshold: float = 0.01  # Lowered from 0.1 — BioBERT is conservative
+    qa_device: int = -1  # -1 = CPU, 0 = GPU
 
     # Performance
     enable_parallel: bool = True
@@ -89,7 +94,7 @@ class RAGConfig:
 
     @classmethod
     def gpu_small_config(cls) -> "RAGConfig":
-        """Create a GPU configuration with smaller model (requires ~8GB VRAM)."""
+        """Create a GPU configuration with a smaller model (requires ~4GB VRAM)."""
         return cls(
             model_name="Qwen/Qwen2.5-3B-Instruct",
             use_vllm=True,
@@ -215,10 +220,54 @@ class RAGPipeline:
             self.llm = LLM(**vllm_kwargs)
             print("✓ vLLM model loaded (GPU)")
 
+        # Extractive QA model — lazy-loaded on first use
+        self._extractor = None
+
         print("\n" + "="*80)
         print("BioMoQA RAG Pipeline Ready")
         print("="*80)
         print()
+
+    @property
+    def extractor(self):
+        """Lazy-load the BioBERT extractive QA model on first use."""
+        if self._extractor is None:
+            from .extraction.extractive_qa import BioExtractiveQA
+            print(f"Loading BioBERT QA model: {self.config.qa_model}")
+            self._extractor = BioExtractiveQA(
+                model_name=self.config.qa_model,
+                confidence_threshold=self.config.qa_confidence_threshold,
+                device=self.config.qa_device,
+            )
+            print("✓ BioBERT QA model loaded")
+        return self._extractor
+
+    def _format_extractive_answer(self, result: Dict, documents: List) -> Dict:
+        """Convert an extractive QA result into the standard answer/references format."""
+        if not result["is_answered"]:
+            return {
+                "answer": [{
+                    "text": "No relevant answer found in the available biomedical sources.",
+                    "citation_ids": [],
+                    "citations": [],
+                }],
+                "references": [],
+            }
+
+        doc = documents[result["doc_idx"]]
+        doc_ref = self._format_doc_ref(doc)
+        return {
+            "answer": [{
+                "text": result["text"],
+                "citation_ids": [result["doc_idx"]],
+                "citations": [{
+                    "document_id": result["doc_idx"],
+                    "document_title": doc.title,
+                    "pmcid": doc_ref,
+                }],
+            }],
+            "references": [f"[{result['doc_idx']}] {doc_ref}: {doc.title}"],
+        }
 
     def run(
         self,
@@ -227,7 +276,8 @@ class RAGPipeline:
         final_n: Optional[int] = None,
         collection: Optional[str] = None,
         return_documents: bool = False,
-        debug: bool = False
+        debug: bool = False,
+        mode: str = "hybrid",
     ) -> Dict:
         """
         Run the RAG pipeline.
@@ -240,6 +290,10 @@ class RAGPipeline:
                         If None, uses default (medline + plazi).
             return_documents: Include documents in response
             debug: Include debug information
+            mode: Answer strategy:
+                  - "hybrid" (default): extractive first, generative fallback
+                  - "extractive": verbatim span from BioBERT, no hallucination possible
+                  - "generative": LLM synthesises a multi-sentence answer
 
         Returns:
             Response dict with answer and metadata
@@ -304,9 +358,27 @@ class RAGPipeline:
                 'pipeline_version': '1.0',
             }
 
-        # Step 5: Generate answer with optimizations
+        # Step 5: Generate or extract answer
         t0 = time.time()
-        parsed_answer = self.generate_fast(question, documents)
+        mode_used = mode  # track which branch actually ran
+        if mode == "extractive":
+            result = self.extractor.extract(
+                question, documents, self.config.max_abstract_length
+            )
+            parsed_answer = self._format_extractive_answer(result, documents)
+        elif mode == "hybrid":
+            # Try extractive first; fall back to generative when not confident enough
+            result = self.extractor.extract(
+                question, documents, self.config.max_abstract_length
+            )
+            if result["is_answered"]:
+                parsed_answer = self._format_extractive_answer(result, documents)
+                mode_used = "hybrid:extractive"
+            else:
+                parsed_answer = self.generate_fast(question, documents)
+                mode_used = "hybrid:generative"
+        else:
+            parsed_answer = self.generate_fast(question, documents)
         generation_time = time.time() - t0
 
         if debug:
@@ -327,6 +399,7 @@ class RAGPipeline:
             'pipeline_time': pipeline_time,
             'num_retrieved': len(documents),
             'pipeline_version': '1.0',
+            'mode_used': mode_used,
         }
 
         if debug:
@@ -407,6 +480,7 @@ Answer:"""
 
     def _generate_vllm(self, prompt: str) -> str:
         """Generate with vLLM (GPU)"""
+        import re
         sampling_params = SamplingParams(
             temperature=self.config.temperature,
             max_tokens=self.config.max_tokens,
@@ -414,7 +488,10 @@ Answer:"""
         )
 
         outputs = self.llm.generate([prompt], sampling_params)
-        return outputs[0].outputs[0].text.strip()
+        text = outputs[0].outputs[0].text.strip()
+        # Qwen3 may emit <think>...</think> reasoning blocks — strip them
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        return text
 
     def _generate_cpu(self, prompt: str) -> str:
         """Generate with transformers (CPU)"""

@@ -25,7 +25,8 @@ class ServerConfig(BaseModel):
 
 class ModelConfig(BaseModel):
     mode: str = "gpu"
-    size: str = "3b"
+    size: str = "8b"
+    model_name: str = "Qwen/Qwen3-8B"
     gpu_memory_utilization: float = 0.83
     quantization: Optional[str] = "fp8"
 
