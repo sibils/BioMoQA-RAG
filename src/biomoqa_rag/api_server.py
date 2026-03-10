@@ -110,7 +110,7 @@ class QuestionRequest(BaseModel):
 
     model_config = {"json_schema_extra": {"example": {
         "question": "What causes malaria?",
-        "retrieval_n": 15,
+        "retrieval_n": 30,
         "final_n": 5,
         "include_documents": True,
         "debug": False,

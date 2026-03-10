@@ -23,7 +23,7 @@ temperature = 0.1
 
 [retrieval]
 # Number of documents to retrieve initially
-retrieval_n = 15
+retrieval_n = 30
 
 # Use smart hybrid retrieval (SIBILS + FAISS)
 use_smart_retrieval = true

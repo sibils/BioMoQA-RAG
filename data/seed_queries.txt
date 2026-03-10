@@ -3,7 +3,8 @@
 # Edit this list to change corpus coverage, then rebuild the index with:
 #   python -m biomoqa_rag.build_dense_index
 #
-# Current corpus: ~2398 documents (built with the queries below)
+# Current corpus: ~2398 documents (built with the original queries below)
+# Add queries for your use case and rebuild the index.
 
 # Diseases
 cancer tumor malignancy
@@ -12,6 +13,39 @@ diabetes metabolic disease
 cardiovascular heart disease
 neurological brain disease
 autoimmune inflammatory disease
+
+# Tick-borne diseases (for questions like "What diseases are associated with ticks?")
+Lyme disease Borrelia tick
+tick-borne disease encephalitis
+Rickettsia tick-borne spotted fever
+Anaplasma Ehrlichia tick-borne
+tick-borne hemorrhagic fever
+
+# Parasites and treatment (for "What parasite are treated with ivermectin?")
+ivermectin antiparasitic helminth
+parasite treatment anthelmintic
+nematode roundworm parasite
+filariasis onchocerciasis parasite
+
+# Vectors and myiasis (for "What species can be vector of eggs of Dermatobia hominis?")
+Dermatobia hominis bot fly myiasis
+myiasis fly larvae vector
+arthropod vector parasite
+
+# Invasive species (for "Where potamopyrgus antipodarum are invasive?")
+Potamopyrgus antipodarum invasive snail
+invasive freshwater species mollusc
+biological invasion aquatic species
+
+# Wildlife biology (for pangolin questions)
+pangolin Manis biology ecology
+pangolin reproduction gestation wildlife
+wildlife mammal anatomy morphology
+
+# Plant pathogens and biocontrol (for "What fungus can control ambrosia ragweed?")
+ambrosia ragweed biological control
+fungus plant pathogen biocontrol
+weed control mycoherbicide
 
 # Organisms
 bacteria microbiome

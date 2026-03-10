@@ -37,7 +37,7 @@ from .retrieval.relevance_filter import FastRelevanceFilter
 class RAGConfig:
     """Configuration for the RAG pipeline"""
     # Retrieval
-    retrieval_n: int = 15
+    retrieval_n: int = 30
     use_smart_retrieval: bool = True
     hybrid_alpha: float = 0.5
 
