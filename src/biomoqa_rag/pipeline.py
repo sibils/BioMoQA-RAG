@@ -336,12 +336,12 @@ class RAGPipeline:
             response['documents'] = [
                 {
                     'ref': self._format_doc_ref(doc),
-                    'source': doc.source,
+                    'source': getattr(doc, 'source', 'faiss'),
                     'title': doc.title,
                     'abstract': doc.abstract,
-                    'pmid': doc.pmid,
-                    'pmcid': doc.pmcid,
-                    'doi': doc.doi,
+                    'pmid': getattr(doc, 'pmid', None),
+                    'pmcid': getattr(doc, 'pmcid', None),
+                    'doi': getattr(doc, 'doi', None),
                 } for doc in documents
             ]
 
