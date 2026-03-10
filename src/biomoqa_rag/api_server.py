@@ -103,10 +103,18 @@ def get_pipeline():
 # Request/Response models
 class QuestionRequest(BaseModel):
     question: str
-    retrieval_n: Optional[int] = None
-    final_n: Optional[int] = None
+    retrieval_n: Optional[int] = None  # None = use config default (15)
+    final_n: Optional[int] = None      # None = use config default (5)
     include_documents: bool = True
     debug: bool = False
+
+    model_config = {"json_schema_extra": {"example": {
+        "question": "What causes malaria?",
+        "retrieval_n": None,
+        "final_n": None,
+        "include_documents": True,
+        "debug": False,
+    }}}
 
 
 class CitationDetail(BaseModel):
