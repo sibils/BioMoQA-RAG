@@ -64,7 +64,11 @@ class RAGConfig:
     # Extractive QA (optional mode — lazy-loaded on first use)
     qa_model: str = "ktrapeznikov/biobert_v1.1_pubmed_squad_v2"
     qa_confidence_threshold: float = 0.01  # Lowered from 0.1 — BioBERT is conservative
-    qa_device: int = -1  # -1 = CPU, 0 = GPU
+    qa_device: int = 0  # 0 = GPU, -1 = CPU
+
+    # SIBILS disk cache
+    sibils_cache_dir: Optional[str] = "data/sibils_cache"
+    sibils_cache_ttl: int = 604800  # 7 days
 
     # Performance
     enable_parallel: bool = True
@@ -132,7 +136,10 @@ class RAGPipeline:
 
         # Load retrievers
         print("Loading retrievers...")
-        self.sibils = SIBILSRetriever()
+        self.sibils = SIBILSRetriever(
+            cache_dir=self.config.sibils_cache_dir,
+            cache_ttl=self.config.sibils_cache_ttl,
+        )
 
         self.dense = DenseRetriever(
             model_name="sentence-transformers/all-MiniLM-L6-v2"

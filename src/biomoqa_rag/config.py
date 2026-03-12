@@ -47,6 +47,8 @@ class SibilsConfig(BaseModel):
     query_parser_api_url: str = "https://biodiversitypmc.dev.sibils.org/api/query/parse"
     collections: List[str] = ["medline", "plazi"]
     user_agent: str = "BioMoQA-RAG/1.0 (https://github.com/sibils/BioMoQA-RAG)"
+    cache_dir: str = "data/sibils_cache"
+    cache_ttl: int = 604800  # 7 days
 
 
 class RerankingConfig(BaseModel):
@@ -71,6 +73,10 @@ class DataConfig(BaseModel):
     documents: str = "data/documents.pkl"
 
 
+class ExtractionConfig(BaseModel):
+    device: int = 0  # 0 = GPU, -1 = CPU
+
+
 class Config(BaseModel):
     server: ServerConfig = ServerConfig()
     model: ModelConfig = ModelConfig()
@@ -81,6 +87,7 @@ class Config(BaseModel):
     relevance_filter: RelevanceFilterConfig = RelevanceFilterConfig()
     context: ContextConfig = ContextConfig()
     data: DataConfig = DataConfig()
+    extraction: ExtractionConfig = ExtractionConfig()
 
 
 _config: Optional[Config] = None

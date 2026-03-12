@@ -5,10 +5,16 @@ This module implements the retrieval stage (R) of the Ragnarok RAG pipeline.
 It queries the SIBILS biodiversity/biomedical API to retrieve relevant documents.
 """
 
-import requests
+import hashlib
+import pickle
+import shelve
+import time
+from pathlib import Path
 from typing import List, Dict, Optional
 from dataclasses import dataclass
-import time
+
+import requests
+
 from .query_parser import SIBILSQueryParser, ParsedQuery
 
 
@@ -57,6 +63,8 @@ class SIBILSRetriever:
         timeout: int = 30,
         use_query_parser: bool = True,
         use_es_query: bool = True,  # Use full Elasticsearch query with concept annotations
+        cache_dir: Optional[str] = "data/sibils_cache",
+        cache_ttl: int = 604800,  # 7 days
     ):
         """
         Initialize SIBILS retriever.
@@ -70,6 +78,8 @@ class SIBILSRetriever:
             timeout: Request timeout in seconds
             use_query_parser: Use SIBILS query parser to enhance queries
             use_es_query: Use Elasticsearch query (requires query parser)
+            cache_dir: Directory for disk cache (None to disable)
+            cache_ttl: Cache time-to-live in seconds (default 7 days)
         """
         self.api_url = api_url
         if collection is None:
@@ -87,6 +97,46 @@ class SIBILSRetriever:
             self.query_parser = SIBILSQueryParser(collection=first_col)
         else:
             self.query_parser = None
+
+        # Disk cache
+        self._cache_path: Optional[str] = None
+        self._cache_ttl: int = cache_ttl
+        if cache_dir:
+            Path(cache_dir).mkdir(parents=True, exist_ok=True)
+            self._cache_path = str(Path(cache_dir) / "cache")
+
+    # ------------------------------------------------------------------
+    # Cache helpers
+    # ------------------------------------------------------------------
+
+    def _cache_key(self, question: str, collection: str, n: int) -> str:
+        raw = f"{question.lower().strip()}|{collection}|{n}"
+        return hashlib.md5(raw.encode()).hexdigest()
+
+    def _cache_get(self, question: str, collection: str, n: int) -> Optional[List["Document"]]:
+        if not self._cache_path:
+            return None
+        key = self._cache_key(question, collection, n)
+        try:
+            with shelve.open(self._cache_path) as db:
+                entry = db.get(key)
+            if entry and time.time() - entry["ts"] < self._cache_ttl:
+                return entry["docs"]
+        except Exception:
+            pass
+        return None
+
+    def _cache_set(self, question: str, collection: str, n: int, docs: List["Document"]) -> None:
+        if not self._cache_path:
+            return
+        key = self._cache_key(question, collection, n)
+        try:
+            with shelve.open(self._cache_path) as db:
+                db[key] = {"ts": time.time(), "docs": docs}
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
 
     def retrieve(
         self,
@@ -135,7 +185,23 @@ class SIBILSRetriever:
         n: int,
         collection: str,
     ) -> List[Document]:
-        """Retrieve documents from a single SIBILS collection."""
+        """Retrieve documents from a single SIBILS collection (cache-aware)."""
+
+        cached = self._cache_get(question, collection, n)
+        if cached is not None:
+            return cached
+
+        docs = self._retrieve_single_uncached(question, n, collection)
+        self._cache_set(question, collection, n, docs)
+        return docs
+
+    def _retrieve_single_uncached(
+        self,
+        question: str,
+        n: int,
+        collection: str,
+    ) -> List[Document]:
+        """Raw SIBILS API call — no caching."""
 
         # Parse query if enabled
         parsed_query = None
