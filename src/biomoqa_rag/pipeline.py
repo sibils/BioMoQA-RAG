@@ -259,6 +259,7 @@ class RAGPipeline:
                     "citations": [],
                 }],
                 "references": [],
+                "extractive_meta": None,
             }
 
         doc = documents[result["doc_idx"]]
@@ -274,6 +275,12 @@ class RAGPipeline:
                 }],
             }],
             "references": [f"[{result['doc_idx']}] {doc_ref}: {doc.title}"],
+            "extractive_meta": {
+                "passage": result["passage"],
+                "span_start": result["span_start"],
+                "span_end": result["span_end"],
+                "confidence": round(result["score"], 4),
+            },
         }
 
     def run(
@@ -407,6 +414,7 @@ class RAGPipeline:
             'num_retrieved': len(documents),
             'pipeline_version': '1.0',
             'mode_used': mode_used,
+            'extractive_meta': parsed_answer.get('extractive_meta'),  # None for generative
         }
 
         if debug:

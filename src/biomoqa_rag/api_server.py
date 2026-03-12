@@ -137,6 +137,14 @@ class AnswerSentence(BaseModel):
     citations: List[CitationDetail]
 
 
+class ExtractiveMeta(BaseModel):
+    """Span-level metadata for extractive answers — use for passage highlighting."""
+    passage: str    # Full context text fed to BioBERT (title + abstract, truncated)
+    span_start: int  # Character offset of the answer span start within passage
+    span_end: int    # Character offset of the answer span end within passage
+    confidence: float  # BioBERT confidence score (0–1)
+
+
 class QuestionResponse(BaseModel):
     """Ragnarok-style response with sentence-level citations"""
     question: str
@@ -146,7 +154,8 @@ class QuestionResponse(BaseModel):
     pipeline_time: float
     num_retrieved: int
     pipeline_version: str
-    mode_used: Optional[str] = None  # e.g. "hybrid:extractive", "hybrid:generative", "extractive", "generative"
+    mode_used: Optional[str] = None  # e.g. "hybrid:extractive", "hybrid:generative"
+    extractive_meta: Optional[ExtractiveMeta] = None  # Only set for extractive answers
     debug_info: Optional[Dict] = None
     documents: Optional[List[Dict]] = None
 

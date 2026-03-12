@@ -60,20 +60,30 @@ class BioExtractiveQA:
             idx, doc = idx_doc
             context = f"{doc.title}. {doc.abstract}"[:max_context_length]
             result = self.qa(question=question, context=context)
-            return idx, result  # result keys: 'answer', 'score', 'start', 'end'
+            return idx, result, context  # result keys: 'answer', 'score', 'start', 'end'
 
         with ThreadPoolExecutor() as executor:
             results = list(executor.map(_query_doc, enumerate(documents)))
 
-        # Pick the span with the highest confidence across all docs
-        best_idx, best_result = max(results, key=lambda x: x[1]["score"])
+        # SQuAD2 "impossible answer" outputs a HIGH score with an EMPTY answer string.
+        # Filter those out first, then pick the best non-empty span.
+        non_empty = [(idx, r, ctx) for idx, r, ctx in results if r["answer"].strip()]
+        if not non_empty:
+            return {"is_answered": False, "text": None, "doc_idx": None, "score": 0.0,
+                    "span_start": None, "span_end": None, "passage": None}
 
-        if best_result["score"] < self.threshold or not best_result["answer"].strip():
-            return {"is_answered": False, "text": None, "doc_idx": None, "score": 0.0}
+        best_idx, best_result, best_context = max(non_empty, key=lambda x: x[1]["score"])
+
+        if best_result["score"] < self.threshold:
+            return {"is_answered": False, "text": None, "doc_idx": None, "score": 0.0,
+                    "span_start": None, "span_end": None, "passage": None}
 
         return {
             "is_answered": True,
             "text": best_result["answer"],
             "doc_idx": best_idx,
             "score": best_result["score"],
+            "span_start": best_result["start"],  # char offset within passage
+            "span_end": best_result["end"],       # char offset within passage
+            "passage": best_context,              # the context string (title + abstract)
         }
