@@ -14,20 +14,21 @@ class BioExtractiveQA:
     Extractive QA using a BERT-style model trained on SQuAD2.
 
     Given a question and a list of documents, runs QA inference on each
-    document in parallel and returns the best verbatim span found.
-    If the best score is below the confidence threshold, reports no answer.
+    document in parallel and returns ALL valid answer spans ranked by score.
+    SQuAD2 "impossible answer" outputs a high score with an empty string —
+    those are filtered out before ranking so empty-answer docs never win.
     """
 
     def __init__(
         self,
         model_name: str = "ktrapeznikov/biobert_v1.1_pubmed_squad_v2",
-        confidence_threshold: float = 0.1,
+        confidence_threshold: float = 0.01,
         device: int = -1,
     ):
         """
         Args:
             model_name: HuggingFace model ID (must be SQuAD2-fine-tuned for no-answer support)
-            confidence_threshold: Minimum score to consider an answer valid (0-1)
+            confidence_threshold: Minimum score to return a candidate (0-1)
             device: -1 for CPU, 0+ for GPU index
         """
         from transformers import pipeline
@@ -40,50 +41,43 @@ class BioExtractiveQA:
         )
         self.threshold = confidence_threshold
 
-    def extract(self, question: str, documents: List, max_context_length: int = 800) -> Dict:
+    def extract(self, question: str, documents: List, max_context_length: int = 800) -> List[Dict]:
         """
-        Run extractive QA on all documents in parallel and return the best span.
+        Run extractive QA on all documents in parallel.
 
-        Args:
-            question: The biomedical question
-            documents: Retrieved document objects (must have .title and .abstract)
-            max_context_length: Max characters for context (title + abstract)
+        Returns a list of answer candidates sorted by score descending.
+        The list is empty when no document yields a confident answer.
 
-        Returns:
-            Dict with keys:
-              - is_answered (bool)
-              - text (str|None): verbatim extracted span
-              - doc_idx (int|None): index of source document in documents list
-              - score (float): model confidence score
+        Each candidate dict has:
+          - text (str): verbatim extracted span
+          - score (float): model confidence (0-1)
+          - doc_idx (int): index in the documents list
+          - span_start (int): char offset within passage
+          - span_end (int): char offset within passage
+          - passage (str): context fed to BioBERT (title + abstract, truncated)
         """
         def _query_doc(idx_doc):
             idx, doc = idx_doc
             context = f"{doc.title}. {doc.abstract}"[:max_context_length]
             result = self.qa(question=question, context=context)
-            return idx, result, context  # result keys: 'answer', 'score', 'start', 'end'
+            return idx, result, context
 
         with ThreadPoolExecutor() as executor:
             results = list(executor.map(_query_doc, enumerate(documents)))
 
-        # SQuAD2 "impossible answer" outputs a HIGH score with an EMPTY answer string.
-        # Filter those out first, then pick the best non-empty span.
-        non_empty = [(idx, r, ctx) for idx, r, ctx in results if r["answer"].strip()]
-        if not non_empty:
-            return {"is_answered": False, "text": None, "doc_idx": None, "score": 0.0,
-                    "span_start": None, "span_end": None, "passage": None}
+        # SQuAD2 outputs a HIGH score with an EMPTY string when it decides
+        # there is no answer — filter those out before ranking.
+        candidates = []
+        for idx, result, context in results:
+            if result["answer"].strip() and result["score"] >= self.threshold:
+                candidates.append({
+                    "text": result["answer"],
+                    "score": result["score"],
+                    "doc_idx": idx,
+                    "span_start": result["start"],
+                    "span_end": result["end"],
+                    "passage": context,
+                })
 
-        best_idx, best_result, best_context = max(non_empty, key=lambda x: x[1]["score"])
-
-        if best_result["score"] < self.threshold:
-            return {"is_answered": False, "text": None, "doc_idx": None, "score": 0.0,
-                    "span_start": None, "span_end": None, "passage": None}
-
-        return {
-            "is_answered": True,
-            "text": best_result["answer"],
-            "doc_idx": best_idx,
-            "score": best_result["score"],
-            "span_start": best_result["start"],  # char offset within passage
-            "span_end": best_result["end"],       # char offset within passage
-            "passage": best_context,              # the context string (title + abstract)
-        }
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        return candidates

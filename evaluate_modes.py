@@ -91,7 +91,7 @@ def run_query(pipeline, question: str, mode: str) -> tuple[str, float]:
     t0 = time.time()
     result = pipeline.run(question=question, mode=mode, return_documents=False)
     elapsed = time.time() - t0
-    answer_text = " ".join(s["text"] for s in result["answer"]).strip()
+    answer_text = " ".join(a["answer"] for a in result.get("answers", [])).strip()
     return answer_text, elapsed
 
 

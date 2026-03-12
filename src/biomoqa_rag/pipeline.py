@@ -26,6 +26,8 @@ try:
 except ImportError:
     TRANSFORMERS_AVAILABLE = False
 
+PIPELINE_VERSION = "biomoqa-2.0"
+
 from .retrieval.sibils_retriever import SIBILSRetriever
 from .retrieval.dense_retriever import DenseRetriever
 from .retrieval.parallel_hybrid import ParallelHybridRetriever, SmartHybridRetriever
@@ -249,39 +251,24 @@ class RAGPipeline:
             print("✓ BioBERT QA model loaded")
         return self._extractor
 
-    def _format_extractive_answer(self, result: Dict, documents: List) -> Dict:
-        """Convert an extractive QA result into the standard answer/references format."""
-        if not result["is_answered"]:
-            return {
-                "answer": [{
-                    "text": "No relevant answer found in the available biomedical sources.",
-                    "citation_ids": [],
-                    "citations": [],
-                }],
-                "references": [],
-                "extractive_meta": None,
-            }
+    @staticmethod
+    def _format_docid(doc) -> Optional[str]:
+        """Return the raw document identifier (PMID, Plazi ID, or PMC ID)."""
+        if getattr(doc, 'pmid', None):
+            return str(doc.pmid)
+        if getattr(doc, 'doc_id', None) and doc.doc_id != 'unknown':
+            return str(doc.doc_id)
+        if getattr(doc, 'pmcid', None):
+            pmcid = doc.pmcid
+            return pmcid if pmcid.startswith("PMC") else f"PMC{pmcid}"
+        return None
 
-        doc = documents[result["doc_idx"]]
-        doc_ref = self._format_doc_ref(doc)
-        return {
-            "answer": [{
-                "text": result["text"],
-                "citation_ids": [result["doc_idx"]],
-                "citations": [{
-                    "document_id": result["doc_idx"],
-                    "document_title": doc.title,
-                    "pmcid": doc_ref,
-                }],
-            }],
-            "references": [f"[{result['doc_idx']}] {doc_ref}: {doc.title}"],
-            "extractive_meta": {
-                "passage": result["passage"],
-                "span_start": result["span_start"],
-                "span_end": result["span_end"],
-                "confidence": round(result["score"], 4),
-            },
-        }
+    @staticmethod
+    def _model_label(mode_used: str, model_name: str) -> str:
+        """Short model name for the response 'model' field."""
+        if "extractive" in mode_used:
+            return "biobert"
+        return model_name.split("/")[-1].lower()
 
     def run(
         self,
@@ -326,11 +313,12 @@ class RAGPipeline:
             top_k=retrieval_n,
             collection=collection,
         )
+        num_retrieved = len(documents)  # total before reranking/filtering
         retrieval_time = time.time() - t0
 
         if debug:
-            debug_info['retrieval_time'] = retrieval_time
-            debug_info['initial_count'] = len(documents)
+            debug_info['retrieval_time'] = round(retrieval_time, 3)
+            debug_info['initial_count'] = num_retrieved
 
         # Step 2: Optional reranking
         if self.reranker and len(documents) > final_n:
@@ -359,62 +347,79 @@ class RAGPipeline:
         # Step 4: Handle case where no relevant documents found
         if not documents:
             return {
+                'sibils_version': PIPELINE_VERSION,
+                'success': True,
+                'error': '',
                 'question': question,
-                'answer': [{
-                    'text': 'No relevant biomedical sources were found for this question.',
-                    'citation_ids': [],
-                    'citations': []
-                }],
-                'references': [],
-                'response_length': 0,
-                'pipeline_time': time.time() - start_time,
-                'num_retrieved': 0,
-                'pipeline_version': '1.0',
+                'collection': collection or 'medline+plazi',
+                'model': 'biobert',
+                'ndocs_requested': retrieval_n,
+                'ndocs_returned_by_SIBiLS': 0,
+                'answers': [],
+                'mode_used': mode,
+                'pipeline_time': round(time.time() - start_time, 3),
+                'transformed_query': None,
             }
 
         # Step 5: Generate or extract answer
         t0 = time.time()
-        mode_used = mode  # track which branch actually ran
-        if mode == "extractive":
-            result = self.extractor.extract(
+        mode_used = mode
+        answers = []
+
+        if mode in ("extractive", "hybrid"):
+            candidates = self.extractor.extract(
                 question, documents, self.config.max_abstract_length
             )
-            parsed_answer = self._format_extractive_answer(result, documents)
-        elif mode == "hybrid":
-            # Try extractive first; fall back to generative when not confident enough
-            result = self.extractor.extract(
-                question, documents, self.config.max_abstract_length
-            )
-            if result["is_answered"]:
-                parsed_answer = self._format_extractive_answer(result, documents)
-                mode_used = "hybrid:extractive"
-            else:
-                parsed_answer = self.generate_fast(question, documents)
+            if candidates:
+                mode_used = "extractive" if mode == "extractive" else "hybrid:extractive"
+                for cand in candidates:
+                    doc = documents[cand["doc_idx"]]
+                    answers.append({
+                        "answer": cand["text"],
+                        "answer_score": round(cand["score"], 4),
+                        "docid": self._format_docid(doc),
+                        "doc_retrieval_score": round(float(getattr(doc, 'score', 0.0)), 3),
+                        "doc_text": cand["passage"],
+                        "snippet_start": cand["span_start"],
+                        "snippet_end": cand["span_end"],
+                    })
+
+        if mode == "generative" or (mode == "hybrid" and not answers):
+            if mode == "hybrid":
                 mode_used = "hybrid:generative"
-        else:
-            parsed_answer = self.generate_fast(question, documents)
-        generation_time = time.time() - t0
+            raw_text = self._generate_vllm(self._build_prompt(question, documents)) \
+                if self.config.use_vllm \
+                else self._generate_cpu(self._build_prompt(question, documents))
+            import re
+            clean_text = re.sub(r'\[\d+(?:\s*,\s*\d+)*\]', '', raw_text).strip()
+            top_doc = documents[0]
+            answers.append({
+                "answer": clean_text,
+                "answer_score": None,
+                "docid": self._format_docid(top_doc),
+                "doc_retrieval_score": round(float(getattr(top_doc, 'score', 0.0)), 3),
+                "doc_text": f"{top_doc.title}. {top_doc.abstract}"[:self.config.max_abstract_length],
+                "snippet_start": None,
+                "snippet_end": None,
+            })
 
         if debug:
-            debug_info['generation_time'] = generation_time
+            debug_info['generation_time'] = round(time.time() - t0, 3)
             debug_info['final_count'] = len(documents)
 
-        pipeline_time = time.time() - start_time
-
-        # Calculate response length
-        response_length = sum(len(sent['text']) for sent in parsed_answer['answer'])
-
-        # Build response (Ragnarok-style format)
         response = {
+            'sibils_version': PIPELINE_VERSION,
+            'success': True,
+            'error': '',
             'question': question,
-            'answer': parsed_answer['answer'],  # List of sentences with citations
-            'references': parsed_answer['references'],  # List of cited documents
-            'response_length': response_length,
-            'pipeline_time': pipeline_time,
-            'num_retrieved': len(documents),
-            'pipeline_version': '1.0',
+            'collection': collection or 'medline+plazi',
+            'model': self._model_label(mode_used, self.config.model_name),
+            'ndocs_requested': retrieval_n,
+            'ndocs_returned_by_SIBiLS': num_retrieved,
+            'answers': answers,
             'mode_used': mode_used,
-            'extractive_meta': parsed_answer.get('extractive_meta'),  # None for generative
+            'pipeline_time': round(time.time() - start_time, 3),
+            'transformed_query': None,
         }
 
         if debug:
@@ -423,7 +428,7 @@ class RAGPipeline:
         if return_documents:
             response['documents'] = [
                 {
-                    'ref': self._format_doc_ref(doc),
+                    'docid': self._format_docid(doc),
                     'source': getattr(doc, 'source', 'faiss'),
                     'title': doc.title,
                     'abstract': doc.abstract,
@@ -435,64 +440,29 @@ class RAGPipeline:
 
         return response
 
-    @staticmethod
-    def _format_doc_ref(doc) -> str:
-        """Format a human-readable reference identifier for a document."""
-        if getattr(doc, 'pmcid', None):
-            pmcid = doc.pmcid
-            return pmcid if pmcid.startswith("PMC") else f"PMC{pmcid}"
-        if getattr(doc, 'pmid', None):
-            return f"PMID:{doc.pmid}"
-        if getattr(doc, 'doi', None):
-            return f"doi:{doc.doi}"
-        return getattr(doc, 'doc_id', 'unknown')
-
-    def generate_fast(self, question: str, documents: List) -> Dict:
-        """Generate answer with fast optimizations and parse citations"""
-
-        # Build optimized context
+    def _build_prompt(self, question: str, documents: List) -> str:
+        """Build the LLM prompt from question and retrieved documents."""
         context_parts = []
         for i, doc in enumerate(documents):
-            # Truncate abstract if configured
             abstract = doc.abstract
             if self.config.truncate_abstracts:
                 abstract = abstract[:self.config.max_abstract_length]
                 if len(doc.abstract) > self.config.max_abstract_length:
                     abstract += "..."
-
-            doc_ref = self._format_doc_ref(doc)
-            context_parts.append(
-                f"[{i}] {doc_ref}: {doc.title}\n{abstract}"
-            )
+            docid = self._format_docid(doc) or str(i)
+            context_parts.append(f"[{i}] {docid}: {doc.title}\n{abstract}")
 
         context = "\n\n".join(context_parts)
-
-        # Biomedical QA prompt with clear instructions
-        prompt = f"""You are a biomedical expert assistant. Answer the question based ONLY on the provided scientific sources.
-
-Instructions:
-- Be concise and factual (2-4 sentences unless more detail is needed)
-- Cite sources using [0], [1], etc. after each claim
-- If the sources don't contain enough information, say "Based on the available sources, this question cannot be fully answered"
-- Do not add information not present in the sources
-
-Sources:
-{context}
-
-Question: {question}
-
-Answer:"""
-
-        # Generate based on backend
-        if self.config.use_cpu:
-            answer_text = self._generate_cpu(prompt)
-        else:
-            answer_text = self._generate_vllm(prompt)
-
-        # Parse answer into sentences with citations
-        parsed_answer = self._parse_answer_with_citations(answer_text, documents)
-
-        return parsed_answer
+        return (
+            "You are a biomedical expert assistant. Answer the question based ONLY on the provided scientific sources.\n\n"
+            "Instructions:\n"
+            "- Be concise and factual (2-4 sentences unless more detail is needed)\n"
+            "- Cite sources using [0], [1], etc. after each claim\n"
+            "- If the sources don't contain enough information, say \"Based on the available sources, this question cannot be fully answered\"\n"
+            "- Do not add information not present in the sources\n\n"
+            f"Sources:\n{context}\n\n"
+            f"Question: {question}\n\nAnswer:"
+        )
 
     def _generate_vllm(self, prompt: str) -> str:
         """Generate with vLLM (GPU)"""
@@ -527,92 +497,3 @@ Answer:"""
         generated = outputs[0][inputs['input_ids'].shape[1]:]
         return self.tokenizer.decode(generated, skip_special_tokens=True).strip()
 
-    def _parse_answer_with_citations(self, answer_text: str, documents: List) -> Dict:
-        """Parse answer text into sentences with citation extraction"""
-        import re
-
-        # Smart sentence splitting that handles abbreviations and numbers
-        # First, protect common patterns that shouldn't trigger splits
-        protected = answer_text
-        protections = [
-            (r'(e\.g\.)', '__EG__'),
-            (r'(i\.e\.)', '__IE__'),
-            (r'(et al\.)', '__ETAL__'),
-            (r'(vs\.)', '__VS__'),
-            (r'(Dr\.)', '__DR__'),
-            (r'(Fig\.)', '__FIG__'),
-            (r'(No\.)', '__NO__'),
-            (r'(\d+\.\d+)', '__NUM__'),  # Decimal numbers
-        ]
-        for pattern, placeholder in protections:
-            protected = re.sub(pattern, placeholder, protected)
-
-        # Split on period followed by space and capital letter, or end of string
-        sentences = re.split(r'\.(?:\s+(?=[A-Z])|\s*$)', protected)
-
-        # Restore protected patterns
-        restored_sentences = []
-        for sent in sentences:
-            restored = sent
-            for pattern, placeholder in protections:
-                original = pattern.replace('(', '').replace(')', '').replace('\\', '')
-                restored = restored.replace(placeholder, original)
-            restored_sentences.append(restored)
-        sentences = restored_sentences
-
-        parsed_sentences = []
-        all_citation_ids = set()
-
-        for sentence in sentences:
-            if not sentence.strip():
-                continue
-
-            # Find citation markers like [0], [1], [0, 1], etc.
-            citation_pattern = r'\[(\d+(?:\s*,\s*\d+)*)\]'
-            citations_found = re.findall(citation_pattern, sentence)
-
-            # Extract unique citation IDs
-            citation_ids = []
-            for cite_group in citations_found:
-                ids = [int(x.strip()) for x in cite_group.split(',')]
-                citation_ids.extend(ids)
-
-            # Remove duplicates and sort
-            citation_ids = sorted(list(set(citation_ids)))
-            all_citation_ids.update(citation_ids)
-
-            # Build citation details
-            citation_details = []
-            for cid in citation_ids:
-                if cid < len(documents):
-                    doc = documents[cid]
-                    citation_details.append({
-                        'document_id': cid,
-                        'document_title': doc.title,
-                        'pmcid': self._format_doc_ref(doc),
-                    })
-
-            # Remove citation markers from text for clean display
-            clean_text = re.sub(citation_pattern, '', sentence).strip()
-
-            # Add period back if not present
-            if clean_text and not clean_text.endswith('.'):
-                clean_text += '.'
-
-            parsed_sentences.append({
-                'text': clean_text,
-                'citation_ids': citation_ids,
-                'citations': citation_details
-            })
-
-        # Build references list
-        references = []
-        for i, doc in enumerate(documents):
-            if i in all_citation_ids:
-                doc_ref = self._format_doc_ref(doc)
-                references.append(f"[{i}] {doc_ref}: {doc.title}")
-
-        return {
-            'answer': parsed_sentences,
-            'references': references
-        }

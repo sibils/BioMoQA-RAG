@@ -104,58 +104,50 @@ def get_pipeline():
     return pipeline
 
 
-# Request/Response models
+# ---------------------------------------------------------------------------
+# Request / Response models (aligned with biodiversitypmc.sibils.org/api/QA)
+# ---------------------------------------------------------------------------
+
 class QuestionRequest(BaseModel):
     question: str
-    retrieval_n: Optional[int] = None  # None = use config default (15)
-    final_n: Optional[int] = None      # None = use config default (5)
-    include_documents: bool = True
+    retrieval_n: Optional[int] = None
+    final_n: Optional[int] = None
+    include_documents: bool = False
     debug: bool = False
-    mode: str = "hybrid"  # "hybrid" (default), "extractive", or "generative"
+    mode: str = "hybrid"  # "hybrid" | "extractive" | "generative"
 
     model_config = {"json_schema_extra": {"example": {
         "question": "What causes malaria?",
-        "retrieval_n": 30,
-        "final_n": 5,
-        "include_documents": True,
-        "debug": False,
         "mode": "hybrid",
     }}}
 
 
-class CitationDetail(BaseModel):
-    """Citation information for a single document"""
-    document_id: int
-    document_title: str
-    pmcid: str
+class AnswerItem(BaseModel):
+    """One ranked answer candidate — mirrors the old sibils.org answer object."""
+    answer: str
+    answer_score: Optional[float]       # BioBERT span score; None for generative
+    docid: Optional[str]                # PMID, Plazi treatment ID, or PMC ID
+    doc_retrieval_score: Optional[float]
+    doc_text: Optional[str]             # Context passage (title + abstract, truncated)
+    snippet_start: Optional[int]        # Char offset of answer span in doc_text
+    snippet_end: Optional[int]          # Char offset of answer span in doc_text
 
 
-class AnswerSentence(BaseModel):
-    """Single sentence with citations"""
-    text: str
-    citation_ids: List[int]
-    citations: List[CitationDetail]
-
-
-class ExtractiveMeta(BaseModel):
-    """Span-level metadata for extractive answers — use for passage highlighting."""
-    passage: str    # Full context text fed to BioBERT (title + abstract, truncated)
-    span_start: int  # Character offset of the answer span start within passage
-    span_end: int    # Character offset of the answer span end within passage
-    confidence: float  # BioBERT confidence score (0–1)
-
-
-class QuestionResponse(BaseModel):
-    """Ragnarok-style response with sentence-level citations"""
+class QAResponse(BaseModel):
+    """Response format aligned with biodiversitypmc.sibils.org/api/QA."""
+    sibils_version: str
+    success: bool
+    error: str
     question: str
-    answer: List[AnswerSentence]  # List of sentences with citations
-    references: List[str]  # List of all cited documents
-    response_length: int
-    pipeline_time: float
-    num_retrieved: int
-    pipeline_version: str
-    mode_used: Optional[str] = None  # e.g. "hybrid:extractive", "hybrid:generative"
-    extractive_meta: Optional[ExtractiveMeta] = None  # Only set for extractive answers
+    collection: str
+    model: str                          # "biobert" | short generative model name
+    ndocs_requested: int
+    ndocs_returned_by_SIBiLS: int
+    answers: List[AnswerItem]           # Ranked answer candidates (best first)
+    # Extra fields not in old API — kept for observability
+    mode_used: Optional[str] = None    # e.g. "hybrid:extractive"
+    pipeline_time: Optional[float] = None
+    transformed_query: None = None     # Not applicable (we use FAISS, not ES)
     debug_info: Optional[Dict] = None
     documents: Optional[List[Dict]] = None
 
@@ -195,65 +187,89 @@ def health_check():
     }
 
 
-@app.post("/qa", response_model=QuestionResponse)
-def answer_question(
-    request: QuestionRequest,
-    col: Optional[str] = Query(
-        default=None,
-        description='SIBILS collection to search: "medline", "plazi", "pmc", or "suppdata". '
-                    'If omitted, searches both medline and plazi.',
-    ),
-):
-    """
-    Answer a biomedical question using the RAG pipeline.
-
-    Features:
-    - Hybrid retrieval (SIBILS + Dense FAISS)
-    - Cross-encoder reranking
-    - Sentence-level citations
-
-    Use the `col` query parameter to restrict retrieval to a single
-    SIBILS collection (e.g. `?col=plazi`).  When omitted the pipeline
-    searches **medline + plazi** by default.
-
-    Set `mode` in the request body to switch answer strategy:
-    - `"hybrid"` (default): extractive span first (no hallucination); falls back
-      to LLM synthesis when BioBERT confidence is too low
-    - `"extractive"`: verbatim span only — returns "no answer" if not confident
-    - `"generative"`: LLM always synthesises a multi-sentence answer
-
-    The response includes `mode_used` indicating which branch ran
-    (`"hybrid:extractive"`, `"hybrid:generative"`, `"extractive"`, or `"generative"`).
-
-    Returns:
-        Answer with citations and metadata
-    """
-    # Validate collection if provided
+def _run_qa(
+    question: str,
+    col: Optional[str],
+    n: Optional[int],
+    mode: str = "hybrid",
+    include_documents: bool = False,
+    debug: bool = False,
+    retrieval_n: Optional[int] = None,
+    final_n: Optional[int] = None,
+) -> QAResponse:
+    """Shared logic for both POST /qa and GET /api/QA."""
     from .retrieval.sibils_retriever import SIBILSRetriever
     if col is not None and col not in SIBILSRetriever.VALID_COLLECTIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid collection '{col}'. "
-                   f"Valid values: {', '.join(sorted(SIBILSRetriever.VALID_COLLECTIONS))}",
+        return QAResponse(
+            sibils_version="biomoqa-2.0", success=False,
+            error=f"Invalid collection '{col}'. Valid: {', '.join(sorted(SIBILSRetriever.VALID_COLLECTIONS))}",
+            question=question, collection=col or "", model="", ndocs_requested=0,
+            ndocs_returned_by_SIBiLS=0, answers=[],
         )
 
     try:
         p = get_pipeline()
-
         result = p.run(
-            question=request.question,
-            retrieval_n=request.retrieval_n,
-            final_n=request.final_n,
+            question=question,
+            retrieval_n=retrieval_n or n,
+            final_n=final_n,
             collection=col,
-            return_documents=request.include_documents,
-            debug=request.debug,
-            mode=request.mode,
+            return_documents=include_documents,
+            debug=debug,
+            mode=mode,
+        )
+        return QAResponse(**result)
+    except Exception as e:
+        logger.exception("Pipeline error")
+        return QAResponse(
+            sibils_version="biomoqa-2.0", success=False, error=str(e),
+            question=question, collection=col or "medline+plazi", model="",
+            ndocs_requested=0, ndocs_returned_by_SIBiLS=0, answers=[],
         )
 
-        return QuestionResponse(**result)
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.post("/qa", response_model=QAResponse)
+def answer_question_post(
+    request: QuestionRequest,
+    col: Optional[str] = Query(default=None, description='SIBILS collection: "medline", "plazi", "pmc", or "suppdata"'),
+):
+    """
+    Answer a biomedical question (POST).
+
+    `mode` in the request body controls the answer strategy:
+    - `"hybrid"` (default): BioBERT extractive span; LLM fallback when not confident
+    - `"extractive"`: verbatim span only, never hallucinates
+    - `"generative"`: LLM always synthesises an answer
+
+    Response mirrors the `biodiversitypmc.sibils.org/api/QA` format:
+    `answers` is a ranked list of candidates with `snippet_start`/`snippet_end`
+    offsets into `doc_text` for client-side passage highlighting.
+    """
+    return _run_qa(
+        question=request.question,
+        col=col,
+        n=None,
+        mode=request.mode,
+        include_documents=request.include_documents,
+        debug=request.debug,
+        retrieval_n=request.retrieval_n,
+        final_n=request.final_n,
+    )
+
+
+@app.get("/api/QA", response_model=QAResponse)
+def answer_question_get(
+    q: str = Query(..., description="Natural language question"),
+    col: Optional[str] = Query(default=None, description='Collection: "medline" or "plazi"'),
+    n: Optional[int] = Query(default=None, description="Number of documents to process (default: 5)"),
+    mode: str = Query(default="hybrid", description='Answer mode: "hybrid", "extractive", or "generative"'),
+):
+    """
+    GET endpoint — backwards-compatible with biodiversitypmc.sibils.org/api/QA.
+
+    Example: /api/QA?col=medline&q=What+causes+malaria%3F&n=5
+    """
+    return _run_qa(question=q, col=col, n=n, mode=mode)
 
 
 @app.get("/retrieval-info")
