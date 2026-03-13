@@ -4,7 +4,6 @@ Cross-dataset evaluation comparing our pipeline vs biodiversitypmc.sibils.org/ap
 Datasets:
   1. biomoqa120  – our in-house 120 parasitology/biodiversity questions (gold standard)
   2. bioasq      – BioASQ Task B factoid subset (standard biomedical QA benchmark)
-  3. pubmedqa    – PubMedQA pqa_labeled yes/no/maybe subset
 
 For each question we query:
   A. Our pipeline   (extractive mode, no LLM needed)
@@ -265,8 +264,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit-biomoqa", type=int, default=120)
-    parser.add_argument("--limit-bioasq",  type=int, default=50)
-    parser.add_argument("--limit-pubmed",  type=int, default=50)
+    parser.add_argument("--limit-bioasq",  type=int, default=120)
     parser.add_argument("--output", default="results/eval_all.csv")
     parser.add_argument("--json",   default="results/eval_all_summary.json")
     args = parser.parse_args()
@@ -307,18 +305,10 @@ if __name__ == "__main__":
 
     # ── Dataset 2: BioASQ ───────────────────────────────────────────────────
     print(f"\n{'='*60}")
-    print("Dataset 2/3: BioASQ factoid (general biomedical QA)")
+    print("Dataset 2/2: BioASQ factoid (general biomedical QA)")
     print("="*60)
     qs = load_bioasq(args.limit_bioasq)
     rows = evaluate_dataset("bioasq", qs, pipeline, writer, out_file, done_keys)
-    all_rows.extend(rows)
-
-    # ── Dataset 3: PubMedQA ─────────────────────────────────────────────────
-    print(f"\n{'='*60}")
-    print("Dataset 3/3: PubMedQA (yes/no/maybe from PubMed abstracts)")
-    print("="*60)
-    qs = load_pubmedqa(args.limit_pubmed)
-    rows = evaluate_dataset("pubmedqa", qs, pipeline, writer, out_file, done_keys)
     all_rows.extend(rows)
 
     out_file.close()
