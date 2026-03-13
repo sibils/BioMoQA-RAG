@@ -360,7 +360,7 @@ class RAGPipeline:
                 'error': '',
                 'question': question,
                 'collection': collection or 'medline+plazi',
-                'model': 'biobert',
+                'model': self._model_label(mode, self.config.model_name),
                 'ndocs_requested': retrieval_n,
                 'ndocs_returned_by_SIBiLS': 0,
                 'answers': [],
