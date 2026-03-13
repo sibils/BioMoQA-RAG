@@ -470,7 +470,8 @@ class RAGPipeline:
         sampling_params = SamplingParams(
             temperature=self.config.temperature,
             max_tokens=self.config.max_tokens,
-            top_p=0.9
+            top_p=0.9,
+            repetition_penalty=1.15,
         )
 
         outputs = self.llm.generate([prompt], sampling_params)
