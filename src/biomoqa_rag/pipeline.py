@@ -344,6 +344,14 @@ class RAGPipeline:
                 debug_info['filter_time'] = time.time() - t0
                 debug_info['filtered_count'] = len(documents)
 
+        # Normalize retrieval scores to [0, 1] across the final document set
+        # so the response always shows a consistent scale regardless of source
+        # (BM25 scores can be >100, FAISS cosine scores are already 0-1).
+        _scores = [float(getattr(d, 'score', 0.0)) for d in documents]
+        _min, _max = min(_scores, default=0.0), max(_scores, default=1.0)
+        for d, s in zip(documents, _scores):
+            d.score = round((s - _min) / (_max - _min), 4) if _max > _min else 1.0
+
         # Step 4: Handle case where no relevant documents found
         if not documents:
             return {
