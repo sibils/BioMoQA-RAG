@@ -1,16 +1,17 @@
 """
 Comparison evaluation: generative (LLM) vs extractive (BioBERT) mode.
 
-Runs both pipeline modes on the 120 benchmark questions and computes
+Runs both pipeline modes on the benchmark questions and computes
 F1, ROUGE-1/2/L, answer rate, and speed. Outputs per-question CSV
 and a summary table.
 
 Usage:
-    python evaluate_modes.py                        # run both modes
-    python evaluate_modes.py --modes extractive     # extractive only
-    python evaluate_modes.py --modes generative     # generative only
-    python evaluate_modes.py --limit 10             # first N questions only
-    python evaluate_modes.py --resume               # skip already-done rows
+    python evaluate_modes.py                                # biomoqa120, both modes
+    python evaluate_modes.py --modes extractive             # extractive only
+    python evaluate_modes.py --modes generative             # generative only
+    python evaluate_modes.py --limit 10                     # first N questions only
+    python evaluate_modes.py --resume                       # skip already-done rows
+    python evaluate_modes.py --datasets biomoqa120 bioasq   # multiple datasets
 """
 
 import argparse
@@ -99,31 +100,63 @@ def run_query(pipeline, question: str, mode: str) -> tuple[str, float]:
 # Main
 # ---------------------------------------------------------------------------
 
+def load_bioasq(limit: int | None = None) -> pd.DataFrame:
+    """Load BioASQ factoid questions (kroshan/BioASQ on HuggingFace)."""
+    import re
+    print("  Downloading BioASQ …")
+    from datasets import load_dataset
+    ds = load_dataset("kroshan/BioASQ", split="train")
+    rows = []
+    for i, item in enumerate(ds):
+        q = item.get("question", "").strip()
+        text = item.get("text", "")
+        m = re.search(r"<answer>\s*(.+?)\s*<context>", text, re.DOTALL)
+        gold = m.group(1).strip() if m else ""
+        if q and gold:
+            rows.append({"question_id": 10000 + len(rows), "question": q, "golden_answer": gold, "dataset": "bioasq"})
+        if limit and len(rows) >= limit:
+            break
+    print(f"  Loaded {len(rows)} BioASQ questions")
+    return pd.DataFrame(rows)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--modes", nargs="+", default=["generative", "extractive"],
                         choices=["generative", "extractive"])
+    parser.add_argument("--datasets", nargs="+", default=["biomoqa120"],
+                        choices=["biomoqa120", "bioasq"],
+                        help="Which datasets to evaluate")
     parser.add_argument("--limit", type=int, default=None,
-                        help="Evaluate only the first N questions")
+                        help="Evaluate only the first N questions per dataset")
     parser.add_argument("--resume", action="store_true",
                         help="Skip question IDs already present in output CSV")
     parser.add_argument("--input", default="results/biomoqa_120_results.csv",
-                        help="Input CSV with question/golden_answer columns")
+                        help="Input CSV for biomoqa120 (with question_id/question/golden_answer)")
     parser.add_argument("--output", default="results/mode_comparison.csv",
                         help="Output CSV path")
     args = parser.parse_args()
 
-    input_path = Path(args.input)
     output_path = Path(args.output)
 
-    if not input_path.exists():
-        raise FileNotFoundError(f"Input file not found: {input_path}")
-
     # Load benchmark questions
-    df = pd.read_csv(input_path)
-    df = df[["question_id", "question", "golden_answer"]].dropna()
-    if args.limit:
-        df = df.head(args.limit)
+    frames = []
+    if "biomoqa120" in args.datasets:
+        input_path = Path(args.input)
+        if not input_path.exists():
+            raise FileNotFoundError(f"Input file not found: {input_path}")
+        bio_df = pd.read_csv(input_path)[["question_id", "question", "golden_answer"]].dropna()
+        bio_df["dataset"] = "biomoqa120"
+        frames.append(bio_df)
+    if "bioasq" in args.datasets:
+        frames.append(load_bioasq(limit=args.limit))
+
+    df = pd.concat(frames, ignore_index=True)
+    if args.limit and "biomoqa120" in args.datasets:
+        # Apply limit to biomoqa120 subset specifically
+        bio_mask = df["dataset"] == "biomoqa120"
+        df = pd.concat([df[bio_mask].head(args.limit), df[~bio_mask]], ignore_index=True)
+    df = df.reset_index(drop=True)
 
     # Resume: skip already-done rows
     done_ids = set()
@@ -143,7 +176,7 @@ def main():
     write_header = not output_path.exists() or not args.resume
     out_file = open(output_path, "a" if args.resume else "w", newline="")
     fieldnames = [
-        "question_id", "mode", "question", "golden_answer",
+        "dataset", "question_id", "mode", "question", "golden_answer",
         "model_answer", "is_answered",
         "f1", "rouge1", "rouge2", "rougeL",
         "pipeline_time_seconds",
@@ -157,6 +190,7 @@ def main():
 
     for _, row in df.iterrows():
         qid = int(row["question_id"])
+        dataset = str(row.get("dataset", "biomoqa120"))
         question = str(row["question"])
         golden = str(row["golden_answer"])
 
@@ -176,6 +210,7 @@ def main():
             rouge = compute_rouge(answer, golden) if answered else {"rouge1": 0.0, "rouge2": 0.0, "rougeL": 0.0}
 
             writer.writerow({
+                "dataset": dataset,
                 "question_id": qid,
                 "mode": mode,
                 "question": question,
@@ -204,33 +239,13 @@ def main():
     results = pd.read_csv(output_path)
     results = results[results["mode"].isin(args.modes)]
 
-    # If only extractive was run, also pull in existing generative metrics for comparison
-    existing_gen_path = Path("results/evaluation_detailed.csv")
-    if args.modes == ["extractive"] and existing_gen_path.exists():
-        gen_df = pd.read_csv(existing_gen_path)
-        # Compute answer_rate for generative (non-empty model_answer)
-        gen_df["is_answered"] = gen_df["model_answer"].fillna("").apply(
-            lambda x: 0 if NO_ANSWER_MARKER in x.lower() else 1
-        )
-        gen_df["mode"] = "generative (existing)"
-        gen_df = gen_df.rename(columns={
-            "rouge1": "rouge1",
-            "rouge2": "rouge2",
-            "rougeL": "rougeL",
-            "f1": "f1",
-        })
-        if args.limit:
-            gen_df = gen_df.head(args.limit)
-        results = pd.concat([results, gen_df[
-            ["mode", "is_answered", "f1", "rouge1", "rouge2", "rougeL"]
-        ]], ignore_index=True)
-
     print("\n" + "=" * 70)
     print("COMPARISON SUMMARY")
     print("=" * 70)
 
+    group_cols = ["dataset", "mode"] if "dataset" in results.columns else ["mode"]
     summary = (
-        results.groupby("mode")
+        results.groupby(group_cols)
         .agg(
             questions=("question_id", "count"),
             answer_rate=("is_answered", "mean"),
