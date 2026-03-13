@@ -461,15 +461,20 @@ class RAGPipeline:
             context_parts.append(f"[{i}] {docid}: {doc.title}\n{abstract}")
 
         context = "\n\n".join(context_parts)
+        # Qwen3 chat format with thinking disabled.
+        # Pre-filling <think>\n\n</think> tells the model its thinking is done
+        # and it should output the answer directly, preventing reasoning leakage.
+        system = (
+            "You are a biomedical expert assistant. Answer the question based ONLY "
+            "on the provided scientific sources. Be concise and factual (2-4 sentences). "
+            "Cite sources using [0], [1], etc. after each claim. "
+            "If the sources lack sufficient information, say so briefly."
+        )
+        user = f"Sources:\n{context}\n\nQuestion: {question}"
         return (
-            "You are a biomedical expert assistant. Answer the question based ONLY on the provided scientific sources.\n\n"
-            "Instructions:\n"
-            "- Be concise and factual (2-4 sentences unless more detail is needed)\n"
-            "- Cite sources using [0], [1], etc. after each claim\n"
-            "- If the sources don't contain enough information, say \"Based on the available sources, this question cannot be fully answered\"\n"
-            "- Do not add information not present in the sources\n\n"
-            f"Sources:\n{context}\n\n"
-            f"Question: {question}\n\nAnswer:"
+            f"<|im_start|>system\n{system}<|im_end|>\n"
+            f"<|im_start|>user\n{user}<|im_end|>\n"
+            f"<|im_start|>assistant\n<think>\n\n</think>\n"
         )
 
     def _generate_vllm(self, prompt: str) -> str:
@@ -483,10 +488,7 @@ class RAGPipeline:
         )
 
         outputs = self.llm.generate([prompt], sampling_params)
-        text = outputs[0].outputs[0].text.strip()
-        # Qwen3 may emit <think>...</think> reasoning blocks — strip them
-        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-        return text
+        return outputs[0].outputs[0].text.strip()
 
     def _generate_cpu(self, prompt: str) -> str:
         """Generate with transformers (CPU)"""
