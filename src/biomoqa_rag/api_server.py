@@ -17,7 +17,9 @@ multiprocessing.set_start_method("spawn", force=True)
 
 # MIG / vGPU workaround for sibils-prod-ai (GRID A100D-1-20C in MIG mode):
 #
-# 1. CUDA_VISIBLE_DEVICES must be the MIG UUID so cuda:0 maps to the MIG partition.
+# 1. Auto-detect the MIG partition UUID via nvidia-smi so the service file does not
+#    need to hardcode it (MIG UUIDs change on VM reboot).
+#    CUDA_VISIBLE_DEVICES must be set to the UUID so cuda:0 maps to the MIG partition.
 #    But vLLM 0.17 tries to int() that string during config creation → pydantic error.
 #    Fix: warm-up CUDA with the UUID first, then reset to "0" (vLLM-parseable).
 #    CUDA keeps the context bound to the MIG device for the process lifetime.
@@ -25,12 +27,27 @@ multiprocessing.set_start_method("spawn", force=True)
 # 2. PyTorch 2.4+ enables expandable_segments (VMM via cuMemCreate) by default.
 #    VMM is NOT supported on NVIDIA vGPU/GRID → "CUDA driver error: operation not supported".
 #    Fix: disable expandable_segments before the first CUDA call.
-_cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-if _cuda_vis.startswith("MIG-"):
+def _setup_mig_cuda():
+    import subprocess, re
+    try:
+        out = subprocess.check_output(["nvidia-smi", "-L"], text=True, timeout=10)
+        m = re.search(r"UUID: (MIG-[0-9a-f-]+)\)", out)
+        if not m:
+            return  # No MIG device found, nothing to do
+        mig_uuid = m.group(1)
+    except Exception:
+        return  # nvidia-smi unavailable or failed
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = mig_uuid
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:False")
-    import torch
-    torch.zeros(1, device="cuda:0")  # init CUDA context with MIG partition
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # reset to numeric for vLLM config
+    try:
+        import torch
+        torch.zeros(1, device="cuda:0")  # init CUDA context with MIG partition
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # reset to numeric for vLLM config
+    except Exception:
+        del os.environ["CUDA_VISIBLE_DEVICES"]  # revert on failure
+
+_setup_mig_cuda()
 
 import logging
 from fastapi import FastAPI, HTTPException, Query
