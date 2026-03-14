@@ -49,6 +49,7 @@ class RAGConfig:
     rerank_n: int = 15
     use_relevance_filter: bool = True
     final_n: int = 5
+    min_extractive_score: float = 0.45  # fallback to generative if BioBERT is less confident
 
     # Generation (optimized)
     model_name: str = "Qwen/Qwen3-8B"  # Qwen3-8B (~8GB VRAM with fp8)
@@ -381,6 +382,7 @@ class RAGPipeline:
             candidates = self.extractor.extract(
                 question, documents, self.config.max_abstract_length
             )
+            candidates = [c for c in candidates if c["score"] >= self.config.min_extractive_score]
             if candidates:
                 mode_used = "extractive" if mode == "extractive" else "hybrid:extractive"
                 for cand in candidates:
