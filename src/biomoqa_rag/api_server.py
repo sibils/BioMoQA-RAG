@@ -291,7 +291,6 @@ def answer_question_get(
 
 class BatchRequest(BaseModel):
     questions: List[str]
-    mode: str = "hybrid"
     retrieval_n: Optional[int] = None
     final_n: Optional[int] = None
     col: Optional[str] = None
@@ -301,17 +300,15 @@ class BatchRequest(BaseModel):
             "What causes malaria?",
             "What diseases are associated with ticks?",
         ],
-        "mode": "extractive",
     }}}
 
 
 @app.post("/batch")
 def answer_batch(request: BatchRequest):
     """
-    Answer multiple questions with optimised parallel processing.
+    Answer multiple questions using the extractive model with parallel retrieval.
 
     Retrieval (SIBILS + FAISS) runs concurrently across all questions.
-    Questions that require LLM generation are batched into a single GPU pass.
     Results are returned in the same order as the input questions.
     """
     p = get_pipeline()
@@ -320,7 +317,6 @@ def answer_batch(request: BatchRequest):
         retrieval_n=request.retrieval_n,
         final_n=request.final_n,
         collection=request.col,
-        mode=request.mode,
     )
     return {"results": results, "count": len(results)}
 

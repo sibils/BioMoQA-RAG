@@ -362,16 +362,12 @@ class RAGPipeline:
         retrieval_n: Optional[int] = None,
         final_n: Optional[int] = None,
         collection: Optional[str] = None,
-        mode: str = "hybrid",
     ) -> List[Dict]:
-        """Run the pipeline on multiple questions with optimised GPU batching.
+        """Run extractive QA on multiple questions with parallel retrieval.
 
-        Strategy:
-        - Retrieval (SIBILS HTTP + FAISS + reranking) runs in parallel threads
-          because it is I/O-bound and thread-safe.
-        - All questions that need LLM generation are batched into a single
-          llm.generate(all_prompts) call — vLLM fills the GPU with all of them
-          at once, which is far faster than N sequential single-prompt calls.
+        Retrieval (SIBILS HTTP + FAISS + reranking) runs concurrently across
+        all questions — I/O-bound, thread-safe.  Results are returned in the
+        same order as the input list.
         """
         from concurrent.futures import ThreadPoolExecutor
         start_time = time.time()
@@ -385,86 +381,31 @@ class RAGPipeline:
                 questions,
             ))
 
-        # ── 2. Extractive pass + collect questions needing generation ──────
-        responses: List[Optional[Dict]] = [None] * len(questions)
-        generation_queue: List[tuple] = []  # (idx, question, documents, num_retrieved, mode_used)
-
-        for i, (question, (documents, num_retrieved)) in enumerate(
-            zip(questions, retrieval_results)
-        ):
-            if not documents:
-                responses[i] = self._build_response(
-                    question, [], documents, num_retrieved,
-                    retrieval_n, collection, mode, time.time() - start_time,
-                )
-                continue
-
+        # ── 2. Extractive pass for each question ───────────────────────────
+        responses = []
+        for question, (documents, num_retrieved) in zip(questions, retrieval_results):
             answers = []
-            mode_used = mode
-
-            if mode in ("extractive", "hybrid"):
+            if documents:
                 candidates = self.extractor.extract(
                     question, documents, self.config.max_abstract_length
                 )
                 candidates = [c for c in candidates
                               if c["score"] >= self.config.min_extractive_score]
-                if candidates:
-                    mode_used = "extractive" if mode == "extractive" else "hybrid:extractive"
-                    for cand in candidates:
-                        doc = documents[cand["doc_idx"]]
-                        answers.append({
-                            "answer": cand["text"],
-                            "answer_score": round(cand["score"], 4),
-                            "docid": self._format_docid(doc),
-                            "doc_retrieval_score": round(float(getattr(doc, 'score', 0.0)), 3),
-                            "doc_text": cand["passage"],
-                            "snippet_start": cand["span_start"],
-                            "snippet_end": cand["span_end"],
-                        })
-
-            if mode == "generative" or (mode == "hybrid" and not answers):
-                generation_queue.append((i, question, documents, num_retrieved, mode))
-            else:
-                responses[i] = self._build_response(
-                    question, answers, documents, num_retrieved,
-                    retrieval_n, collection, mode_used, time.time() - start_time,
-                )
-
-        # ── 3. Single batched vLLM call for all queued questions ───────────
-        if generation_queue:
-            if self.config.use_vllm:
-                prompts = [
-                    self._build_prompt(q, docs)
-                    for _, q, docs, _, _ in generation_queue
-                ]
-                sampling_params = SamplingParams(
-                    temperature=self.config.temperature,
-                    max_tokens=self.config.max_tokens,
-                    top_p=0.9,
-                    repetition_penalty=1.15,
-                )
-                outputs = self.llm.generate(prompts, sampling_params)
-
-                for (i, question, documents, num_retrieved, mode), output in zip(
-                    generation_queue, outputs
-                ):
-                    raw_text = output.outputs[0].text.strip()
-                    answers = self._answers_from_generation(question, raw_text, documents, mode)
-                    mode_used = "hybrid:generative" if mode == "hybrid" else "generative"
-                    responses[i] = self._build_response(
-                        question, answers, documents, num_retrieved,
-                        retrieval_n, collection, mode_used, time.time() - start_time,
-                    )
-            else:
-                # CPU fallback: sequential generation
-                for i, question, documents, num_retrieved, mode in generation_queue:
-                    raw_text = self._generate_cpu(self._build_prompt(question, documents))
-                    answers = self._answers_from_generation(question, raw_text, documents, mode)
-                    mode_used = "hybrid:generative" if mode == "hybrid" else "generative"
-                    responses[i] = self._build_response(
-                        question, answers, documents, num_retrieved,
-                        retrieval_n, collection, mode_used, time.time() - start_time,
-                    )
+                for cand in candidates:
+                    doc = documents[cand["doc_idx"]]
+                    answers.append({
+                        "answer": cand["text"],
+                        "answer_score": round(cand["score"], 4),
+                        "docid": self._format_docid(doc),
+                        "doc_retrieval_score": round(float(getattr(doc, 'score', 0.0)), 3),
+                        "doc_text": cand["passage"],
+                        "snippet_start": cand["span_start"],
+                        "snippet_end": cand["span_end"],
+                    })
+            responses.append(self._build_response(
+                question, answers, documents, num_retrieved,
+                retrieval_n, collection, "extractive", time.time() - start_time,
+            ))
 
         return responses
 
