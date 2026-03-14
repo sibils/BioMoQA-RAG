@@ -289,6 +289,44 @@ def answer_question_get(
     return _run_qa(question=q, col=col, n=n, mode=mode)
 
 
+class BatchRequest(BaseModel):
+    questions: List[str]
+    mode: str = "hybrid"
+    retrieval_n: Optional[int] = None
+    final_n: Optional[int] = None
+    col: Optional[str] = None
+
+    model_config = {"json_schema_extra": {"example": {
+        "questions": [
+            "What causes malaria?",
+            "What diseases are associated with ticks?",
+        ],
+        "mode": "extractive",
+    }}}
+
+
+@app.post("/batch")
+def answer_batch(request: BatchRequest):
+    """
+    Answer multiple questions in sequence. Results are returned in the same
+    order as the input questions. Useful for offline evaluation or bulk processing.
+
+    Each item in the response list has the same structure as a single /qa response.
+    """
+    results = []
+    for question in request.questions:
+        result = _run_qa(
+            question=question,
+            col=request.col,
+            n=None,
+            mode=request.mode,
+            retrieval_n=request.retrieval_n,
+            final_n=request.final_n,
+        )
+        results.append(result)
+    return {"results": results, "count": len(results)}
+
+
 @app.get("/retrieval-info")
 def retrieval_info():
     """Explain the hybrid retrieval system"""
