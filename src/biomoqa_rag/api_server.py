@@ -308,22 +308,20 @@ class BatchRequest(BaseModel):
 @app.post("/batch")
 def answer_batch(request: BatchRequest):
     """
-    Answer multiple questions in sequence. Results are returned in the same
-    order as the input questions. Useful for offline evaluation or bulk processing.
+    Answer multiple questions with optimised parallel processing.
 
-    Each item in the response list has the same structure as a single /qa response.
+    Retrieval (SIBILS + FAISS) runs concurrently across all questions.
+    Questions that require LLM generation are batched into a single GPU pass.
+    Results are returned in the same order as the input questions.
     """
-    results = []
-    for question in request.questions:
-        result = _run_qa(
-            question=question,
-            col=request.col,
-            n=None,
-            mode=request.mode,
-            retrieval_n=request.retrieval_n,
-            final_n=request.final_n,
-        )
-        results.append(result)
+    p = get_pipeline()
+    results = p.run_batch(
+        questions=request.questions,
+        retrieval_n=request.retrieval_n,
+        final_n=request.final_n,
+        collection=request.col,
+        mode=request.mode,
+    )
     return {"results": results, "count": len(results)}
 
 
