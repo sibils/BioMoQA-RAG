@@ -49,7 +49,7 @@ class RAGConfig:
     rerank_n: int = 15
     use_relevance_filter: bool = True
     final_n: int = 5
-    min_extractive_score: float = 0.35  # fallback to generative if BioBERT is less confident
+    min_extractive_score: float = 0.30  # fallback to generative if BioBERT is less confident
 
     # Generation (optimized)
     model_name: str = "Qwen/Qwen3-8B"  # Qwen3-8B (~8GB VRAM with fp8)
