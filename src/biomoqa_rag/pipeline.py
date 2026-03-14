@@ -344,13 +344,16 @@ class RAGPipeline:
                 debug_info['filter_time'] = time.time() - t0
                 debug_info['filtered_count'] = len(documents)
 
-        # Normalize retrieval scores to [0, 1] across the final document set
-        # so the response always shows a consistent scale regardless of source
-        # (BM25 scores can be >100, FAISS cosine scores are already 0-1).
-        _scores = [float(getattr(d, 'score', 0.0)) for d in documents]
-        _min, _max = min(_scores, default=0.0), max(_scores, default=1.0)
-        for d, s in zip(documents, _scores):
-            d.score = round((s - _min) / (_max - _min), 4) if _max > _min else 1.0
+        # Normalize retrieval scores to [0, 1].
+        # FAISS cosine scores are already in [0, 1].
+        # BM25 scores can be >100 — cap at 200 and divide (covers typical range).
+        for d in documents:
+            s = float(getattr(d, 'score', 0.0))
+            source = getattr(d, 'source', 'faiss')
+            if source == 'faiss' or s <= 1.0:
+                d.score = round(min(s, 1.0), 4)
+            else:
+                d.score = round(min(s / 200.0, 1.0), 4)
 
         # Step 4: Handle case where no relevant documents found
         if not documents:
@@ -479,7 +482,6 @@ class RAGPipeline:
 
     def _generate_vllm(self, prompt: str) -> str:
         """Generate with vLLM (GPU)"""
-        import re
         sampling_params = SamplingParams(
             temperature=self.config.temperature,
             max_tokens=self.config.max_tokens,
@@ -488,7 +490,20 @@ class RAGPipeline:
         )
 
         outputs = self.llm.generate([prompt], sampling_params)
-        return outputs[0].outputs[0].text.strip()
+        text = outputs[0].outputs[0].text.strip()
+        # Qwen3 sometimes emits chain-of-thought reasoning after its answer even
+        # with the <think></think> prefix. Strip any <think>...</think> blocks,
+        # then cut at common reasoning openers if they appear mid-answer.
+        import re
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        _reasoning_re = re.compile(
+            r"\n+(Okay[,.]|Let me |First[,.]|Moving to|Starting with|Let's tackle)",
+            re.IGNORECASE,
+        )
+        m = _reasoning_re.search(text)
+        if m:
+            text = text[:m.start()].strip()
+        return text
 
     def _generate_cpu(self, prompt: str) -> str:
         """Generate with transformers (CPU)"""
