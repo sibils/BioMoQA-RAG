@@ -51,6 +51,7 @@ _setup_mig_cuda()
 
 import logging
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict
 
@@ -72,6 +73,13 @@ app = FastAPI(
     title="BioMoQA RAG API",
     description="Biomedical question answering with SIBILS retrieval and sentence-level citations",
     version="1.0.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Initialize pipeline (lazy loading)
