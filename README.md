@@ -1,234 +1,218 @@
-# BioMoQA RAG System
+# BioMoQA RAG
 
-A high-performance biomedical question-answering system using Retrieval-Augmented Generation (RAG) with intelligent query parsing, hybrid retrieval, and optimized inference.
+Biomedical question answering API using hybrid retrieval (SIBILS + FAISS) and BioBERT extractive QA, with an optional Qwen3-8B generative fallback.
 
+Running at: `http://sibils-prod-ai.lan.text-analytics.ch:9000`
 
-## Overview
-
-This system answers biomedical questions by:
-1. **Parsing queries** with SIBILS query parser (generates Elasticsearch queries with concept annotations)
-2. **Retrieving documents** using hybrid search (Elasticsearch + Dense FAISS)
-3. **Reranking** with cross-encoder semantic matching
-4. **Generating answers** with vLLM-optimized LLM (Qwen 2.5-7B)
-5. **Formatting** with sentence-level citations (Ragnarok-style)
-
-## Performance
-
-- **Speed**: 5-7 seconds per question (36x faster than baseline 177s)
-- **Accuracy**: Comprehensive answers with sentence-level citations
-- **Scalability**: Handles concurrent requests with FastAPI
-
-## Quick Start
-
-### Running the API
-
-```bash
-# API is already running on http://sibils-prod-ai.lan.text-analytics.ch:9000
-
-# Check health
-curl http://sibils-prod-ai.lan.text-analytics.ch:9000/health
-
-# Ask a question
-curl -X POST http://sibils-prod-ai.lan.text-analytics.ch:9000/qa \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What causes malaria?"}'
-```
-
-### API Response Format
-
-```json
-{
-  "question": "What causes malaria?",
-  "answer": [
-    {
-      "text": "Malaria is primarily caused by protozoan parasites.",
-      "citation_ids": [3, 9],
-      "citations": [
-        {
-          "document_id": 3,
-          "document_title": "...",
-          "pmcid": "PMCPMC11834219"
-        }
-      ]
-    }
-  ],
-  "references": ["[0] PMC...: Title", ...],
-  "pipeline_time": 6.98
-}
-```
-
-## Key Features
-
-### 1. SIBILS Query Parser Integration
-- Automatically enhances queries with biomedical concepts
-- Annotates with MeSH, NCIT, and AGROVOC ontologies
-- Generates optimized Elasticsearch queries with concept expansion
-- Removes punctuation-only clauses for clean queries
-
-**Example:**
-```
-Input:  "What causes malaria?"
-Output: Elasticsearch query with:
-  - Text match: "causes" AND "malaria"
-  - Concept expansion: mesh:D008288, ncit:C34797, agrovoc:c_34312
-```
-
-### 2. Hybrid Retrieval
-- **Elasticsearch (SIBILS)**: Concept-aware search with ontology expansion
-- **Dense (FAISS)**: Semantic vector search
-- **Parallel**: Both run simultaneously
-- **RRF Fusion**: Combines results intelligently
-
-### 3. Ragnarok-Style Citations
-- Sentence-level citations
-- Structured JSON format
-- Clean, readable text
+---
 
 ## Architecture
 
 ```
-User Question
-     ↓
-SIBILS Query Parser (ES query + concept annotations)
-     ↓
-Parallel Hybrid Retrieval (Elasticsearch + Dense)
-     ↓
-Cross-Encoder Reranking
-     ↓
-vLLM Generation (Qwen 2.5-7B)
-     ↓
-Citation Parsing
-     ↓
-Structured Response
+Question
+   ↓
+Hybrid Retrieval (parallel)
+├── SIBILS BM25 — concept-aware keyword search (medline + plazi)
+└── FAISS dense — semantic search over local index
+   ↓
+Cross-Encoder Reranking  (ms-marco-MiniLM-L-6-v2)
+   ↓
+Relevance Filtering  → top 5 documents
+   ↓
+Extractive QA  (BioBERT — ktrapeznikov/biobert_v1.1_pubmed_squad_v2)
+   └── if no confident span → Generative fallback (Qwen3-8B, vLLM, fp8)
+   ↓
+Structured JSON response
 ```
+
+---
+
+## API Endpoints
+
+Interactive docs: `/docs`
+
+### `POST /qa`
+
+Answer a single question.
+
+**Request:**
+```json
+{
+  "question": "What causes malaria?",
+  "mode": "hybrid",
+  "retrieval_n": 50,
+  "final_n": 5,
+  "include_documents": false,
+  "debug": false
+}
+```
+
+`mode` options:
+- `"hybrid"` (default) — BioBERT extractive span; Qwen3 fallback if not confident
+- `"extractive"` — BioBERT only, never hallucinates
+- `"generative"` — Qwen3 always
+
+**Response:**
+```json
+{
+  "sibils_version": "biomoqa-2.0",
+  "success": true,
+  "error": "",
+  "question": "What causes malaria?",
+  "collection": "medline+plazi",
+  "model": "biobert",
+  "ndocs_requested": 50,
+  "ndocs_returned_by_SIBiLS": 47,
+  "answers": [
+    {
+      "answer": "Malaria is caused by Plasmodium parasites transmitted by Anopheles mosquitoes.",
+      "answer_score": 0.82,
+      "docid": "12345678",
+      "doc_retrieval_score": 0.91,
+      "doc_text": "Title. Abstract...",
+      "snippet_start": 14,
+      "snippet_end": 87
+    }
+  ],
+  "mode_used": "hybrid:extractive",
+  "pipeline_time": 2.1
+}
+```
+
+`answer_score` is the BioBERT span confidence (null for generative). `snippet_start`/`snippet_end` are character offsets into `doc_text` for passage highlighting.
+
+### `GET /api/QA`
+
+Backwards-compatible with `biodiversitypmc.sibils.org/api/QA`.
+
+```
+GET /api/QA?q=What+causes+malaria%3F&col=medline&n=5&mode=hybrid
+```
+
+### `POST /batch`
+
+Answer multiple questions using extractive mode with parallel retrieval. Retrieval runs concurrently across all questions — a batch of N questions takes roughly the same wall time as a single question for the I/O-bound retrieval step.
+
+**Request:**
+```json
+{
+  "questions": [
+    "What causes malaria?",
+    "What diseases are associated with ticks?"
+  ],
+  "retrieval_n": 50,
+  "final_n": 5,
+  "col": null
+}
+```
+
+**Response:**
+```json
+{
+  "results": [ { ...same format as /qa... }, ... ],
+  "count": 2
+}
+```
+
+### `GET /health`
+
+Returns pipeline status and loaded model info.
+
+---
+
+## Configuration
+
+Edit [`config.toml`](config.toml) before deploying:
+
+```toml
+[model]
+mode = "gpu"
+model_name = "Qwen/Qwen3-8B"
+gpu_memory_utilization = 0.83
+quantization = "fp8"
+
+[retrieval]
+retrieval_n = 50
+
+[reranking]
+top_k = 15
+
+[relevance_filter]
+final_n = 5
+
+[generation]
+max_tokens = 512
+temperature = 0.1
+```
+
+---
 
 ## Project Structure
 
 ```
 BioMoQA-RAG/
-├── src/
-│   ├── api_server.py              # FastAPI server
-│   ├── pipeline_vllm_v3_fast.py   # Main RAG pipeline
-│   ├── build_dense_index.py       # Build FAISS index
+├── src/biomoqa_rag/
+│   ├── api_server.py           # FastAPI server + endpoints
+│   ├── pipeline.py             # RAG pipeline (retrieval → QA → generation)
+│   ├── config.py               # Config dataclasses (reads config.toml)
+│   ├── build_dense_index.py    # Build FAISS index from seed queries
 │   ├── retrieval/
-│   │   ├── query_parser.py        # SIBILS query parser
-│   │   ├── sibils_retriever.py    # BM25 with query parsing
-│   │   ├── dense_retriever.py     # FAISS dense retrieval
-│   │   ├── parallel_hybrid.py     # Hybrid orchestration
-│   │   └── reranker.py            # Cross-encoder reranking
-│   ├── generation/
-│   │   └── llm_generator.py       # vLLM generation
-│   └── evaluation/                # Evaluation metrics
+│   │   ├── sibils_retriever.py # SIBILS BM25 API client
+│   │   ├── dense_retriever.py  # FAISS semantic search
+│   │   ├── parallel_hybrid.py  # Hybrid orchestration + RRF fusion
+│   │   ├── reranker.py         # Cross-encoder reranking
+│   │   ├── relevance_filter.py # Overlap-based relevance filter
+│   │   └── query_parser.py     # SIBILS query parser integration
+│   └── extraction/
+│       └── extractive_qa.py    # BioBERT span extraction
 ├── data/
-│   ├── faiss_index.bin            # Dense index
-│   └── documents.pkl              # 2398 documents
-├── setup_service.sh               # Setup systemd service
-├── biomoqa-rag.service            # Systemd service file
-└── docs/                          # Documentation
+│   ├── faiss_index.bin         # Dense index (rebuild with build_dense_index.py)
+│   ├── documents.pkl           # ~2400 biomedical documents
+│   ├── seed_queries.txt        # Seed queries for FAISS index construction
+│   └── sibils_cache/           # Disk cache for SIBILS API responses (7-day TTL)
+├── deploy/                     # Ansible deployment (see deploy/README.md)
+├── results/                    # Evaluation outputs
+├── config.toml                 # Runtime configuration
+└── pyproject.toml              # Package + dependencies
 ```
 
-## Pipeline Evolution
+---
 
-| Version | Time | Key Innovation |
-|---------|------|----------------|
-| Baseline | 177s | Standard processing |
-| V1 | 7.27s | vLLM optimization (24x faster) |
-| V2 | 11.19s | Hybrid retrieval |
-| V3 | 6.81s | Parallel + smart strategy |
-| V3.1 | 6.98s | Query parser + citations |
-| **V3.2** | **~7s** | **Full Elasticsearch queries with concept expansion** |
+## Deployment
 
-## Query Parser Flow
+Managed via Ansible. See [deploy/README.md](deploy/README.md) and [deploy/DEPLOY_GUIDE.md](deploy/DEPLOY_GUIDE.md).
 
-The query parser generates optimized Elasticsearch queries:
-
-1. **Parse**: Call SIBILS query parser API with user question
-2. **Generate ES Query**: Creates structured Elasticsearch query with:
-   - Text matching clauses for keywords
-   - Concept expansion (MeSH, NCIT, AGROVOC annotations)
-   - Boolean logic (must/should clauses)
-3. **Clean**: Remove punctuation-only clauses from ES query
-4. **Retrieve**: POST ES query to SIBILS search API via `jq` parameter
-5. **Fallback**: If ES query fails, fall back to keywords mode
-
-## API Endpoints
-
-### POST /qa
-Ask a question:
-```json
-{
-  "question": "What causes malaria?",
-  "retrieval_n": 20,  // optional
-  "final_n": 10,      // optional
-  "debug": false      // optional
-}
+```bash
+cd deploy
+ansible-playbook -i inventory.yml playbook.yml
 ```
 
-### GET /health
-Check API status
+The service runs as `sibils-qa.service` (systemd) on `sibils-prod-ai`.
 
-### GET /docs
-Interactive API documentation
+### Rebuilding the FAISS index
 
-## Configuration
+After editing `data/seed_queries.txt`, rebuild the dense index:
 
-Edit `api_server_v3_fast.py`:
-
-```python
-config = RAGConfigV3Fast(
-    retrieval_n=20,              # Documents to retrieve
-    use_smart_retrieval=True,    # Adaptive strategy
-    use_reranking=True,          # Cross-encoder
-    final_n=10,                  # Final context size
-    gpu_memory_utilization=0.83  # GPU memory (0.83 = full 20GB on HULK VM)
-)
+```bash
+python -m biomoqa_rag.build_dense_index
 ```
 
-## Performance Tips
+### GPU / MIG notes
 
-### GPU Memory
-- **HULK VM (sibils-prod-ai)**: Use 0.83 (20GB allocated)
-- **MIG GPUs**: Use 0.4 (< 40GB)
-- **Full A100**: Use 0.8 (< 64GB)
+The server runs on a GRID A100D-1-20C vGPU (MIG 1g.20GB, 20GB partition). The MIG UUID is auto-detected at startup via `nvidia-smi -L` — no manual configuration needed. See [deploy/DEPLOY_GUIDE.md](deploy/DEPLOY_GUIDE.md) for details.
 
-### Speed
-- Reduce `retrieval_n` to 10
-- Reduce `final_n` to 5
-- Disable query parser (less accurate)
-
-### Accuracy
-- Increase `retrieval_n` to 50
-- Increase `final_n` to 15
-- Keep query parser enabled
+---
 
 ## Troubleshooting
 
-### API Won't Start
 ```bash
-# Check GPU
+# Service status and logs
+systemctl status sibils-qa
+journalctl -u sibils-qa -f
+
+# GPU usage
 nvidia-smi
 
-# Kill old processes
-nvidia-smi | grep python | awk '{print $5}' | xargs kill -9
-
-# Check logs
-tail -f logs/v3_api.log
-```
-
-### Clear GPU Memory
-```bash
+# Kill stale GPU process
 nvidia-smi | grep python | awk '{print $5}' | xargs kill -9
 ```
-
-## Documentation
-
-- [README.md](README.md) - This file
-- [WORK_EXPLANATION.md](WORK_EXPLANATION.md) - Detailed evolution and design decisions
-- [EVALUATION_REPORT.md](EVALUATION_REPORT.md) - Performance benchmarks
-
-## Acknowledgments
-
-- **SIBILS**: Query parser and BM25 retrieval API
-- **vLLM**: Fast LLM inference
-- **Qwen**: Open-source LLM from Alibaba
-- **FAISS**: Dense vector search from Meta
