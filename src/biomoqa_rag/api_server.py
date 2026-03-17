@@ -183,7 +183,8 @@ def startup_event():
     logger.info("=" * 60)
     logger.info("Starting BioMoQA RAG API")
     logger.info("=" * 60)
-    get_pipeline()
+    p = get_pipeline()
+    _ = p.extractor  # warm up BioBERT so first request is not slow
 
 
 @app.get("/health")

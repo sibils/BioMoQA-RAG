@@ -5,7 +5,6 @@ Extracts verbatim answer spans from retrieved documents — no generation,
 no hallucination. SQuAD2 training enables "no answer" detection.
 """
 
-from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict
 
 
@@ -57,19 +56,14 @@ class BioExtractiveQA:
           - span_end (int): char offset within passage
           - passage (str): context fed to BioBERT (title + abstract, truncated)
         """
-        def _query_doc(idx_doc):
-            idx, doc = idx_doc
-            context = f"{doc.title}. {doc.abstract}"[:max_context_length]
-            result = self.qa(question=question, context=context)
-            return idx, result, context
-
-        with ThreadPoolExecutor() as executor:
-            results = list(executor.map(_query_doc, enumerate(documents)))
+        contexts = [f"{doc.title}. {doc.abstract}"[:max_context_length] for doc in documents]
+        inputs = [{"question": question, "context": ctx} for ctx in contexts]
+        results = self.qa(inputs, batch_size=len(inputs))
 
         # SQuAD2 outputs a HIGH score with an EMPTY string when it decides
         # there is no answer — filter those out before ranking.
         candidates = []
-        for idx, result, context in results:
+        for idx, (result, context) in enumerate(zip(results, contexts)):
             if result["answer"].strip() and result["score"] >= self.threshold:
                 candidates.append({
                     "text": result["answer"],
