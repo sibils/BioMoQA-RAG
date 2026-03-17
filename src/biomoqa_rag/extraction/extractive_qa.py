@@ -12,8 +12,8 @@ class BioExtractiveQA:
     """
     Extractive QA using a BERT-style model trained on SQuAD2.
 
-    Given a question and a list of documents, runs QA inference on each
-    document in parallel and returns ALL valid answer spans ranked by score.
+    Given a question and a list of documents, runs QA inference on all
+    documents in a single batched GPU call and returns ALL valid answer spans ranked by score.
     SQuAD2 "impossible answer" outputs a high score with an empty string —
     those are filtered out before ranking so empty-answer docs never win.
     """
@@ -43,7 +43,7 @@ class BioExtractiveQA:
 
     def extract(self, question: str, documents: List, max_context_length: int = 800) -> List[Dict]:
         """
-        Run extractive QA on all documents in parallel.
+        Run extractive QA on all documents in a single batched GPU call.
 
         Returns a list of answer candidates sorted by score descending.
         The list is empty when no document yields a confident answer.
