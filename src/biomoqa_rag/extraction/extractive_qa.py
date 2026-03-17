@@ -38,6 +38,7 @@ class BioExtractiveQA:
             model=model_name,
             handle_impossible_answer=True,
             device=device,
+            model_kwargs={"low_cpu_mem_usage": False},
         )
         self.threshold = confidence_threshold
 
