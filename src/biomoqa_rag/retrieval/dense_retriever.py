@@ -18,6 +18,7 @@ class Document:
     pmcid: str
     title: str
     abstract: str
+    source: str = "unknown"
     embedding: Optional[np.ndarray] = None
 
 
@@ -125,7 +126,8 @@ class DenseRetriever:
             doc_dict = {
                 'pmcid': doc.pmcid,
                 'title': doc.title,
-                'abstract': doc.abstract
+                'abstract': doc.abstract,
+                'source': doc.source,
             }
             docs_to_save.append(doc_dict)
 
@@ -148,7 +150,8 @@ class DenseRetriever:
             Document(
                 pmcid=d['pmcid'],
                 title=d['title'],
-                abstract=d['abstract']
+                abstract=d['abstract'],
+                source=d.get('source', 'unknown'),
             ) for d in docs_dict
         ]
 
