@@ -45,20 +45,20 @@ class ParallelHybridRetriever:
 
         # Add BM25 scores
         for rank, doc in enumerate(bm25_results, start=1):
-            key = doc.pmcid
+            key = doc.doc_id
             score = (1 - self.alpha) / (self.k + rank)
             rrf_scores[key] = rrf_scores.get(key, 0) + score
             all_docs[key] = doc
 
         # Add dense scores
         for rank, doc in enumerate(dense_results, start=1):
-            key = doc.pmcid
+            key = doc.doc_id
             score = self.alpha / (self.k + rank)
             rrf_scores[key] = rrf_scores.get(key, 0) + score
             all_docs[key] = doc
 
         # Sort by RRF score
-        sorted_pmcids = sorted(
+        sorted_keys = sorted(
             rrf_scores.keys(),
             key=lambda k: rrf_scores[k],
             reverse=True
@@ -66,9 +66,9 @@ class ParallelHybridRetriever:
 
         # Return ranked documents
         results = []
-        for pmcid in sorted_pmcids:
-            doc = all_docs[pmcid]
-            doc.rrf_score = rrf_scores[pmcid]
+        for key in sorted_keys:
+            doc = all_docs[key]
+            doc.rrf_score = rrf_scores[key]
             results.append(doc)
 
         return results
@@ -195,6 +195,12 @@ class SmartHybridRetriever:
         Returns:
             Top-k documents
         """
+        # When a specific collection is requested, the FAISS index has no
+        # collection metadata — it would return documents from any collection.
+        # Use SIBILS only to respect the collection filter.
+        if collection is not None:
+            return self.sibils.retrieve(query, n=top_k, collection=collection)
+
         method = self.should_use_hybrid(query)
 
         if method == 'bm25':
