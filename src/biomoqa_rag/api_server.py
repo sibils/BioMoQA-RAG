@@ -152,7 +152,6 @@ class AnswerItem(BaseModel):
     answer: str
     answer_score: Optional[float]       # BioBERT span score; None for generative
     docid: Optional[str]                # PMID, Plazi treatment ID, or PMC ID
-    doc_source: Optional[str]           # Collection: "medline", "plazi", "pmc", "faiss"
     doc_retrieval_score: Optional[float]
     doc_text: Optional[str]             # Context passage (title + abstract, truncated)
     snippet_start: Optional[int]        # Char offset of answer span in doc_text

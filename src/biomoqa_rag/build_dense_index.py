@@ -57,8 +57,7 @@ def build_biomedical_corpus():
                     all_documents[doc.pmcid] = Document(
                         pmcid=doc.pmcid,
                         title=doc.title,
-                        abstract=doc.abstract,
-                        source=doc.source,
+                        abstract=doc.abstract
                     )
 
             # Rate limiting

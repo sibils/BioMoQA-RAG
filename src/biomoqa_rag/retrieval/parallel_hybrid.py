@@ -45,20 +45,20 @@ class ParallelHybridRetriever:
 
         # Add BM25 scores
         for rank, doc in enumerate(bm25_results, start=1):
-            key = getattr(doc, 'doc_id', None) or getattr(doc, 'pmcid', None)
+            key = doc.pmcid
             score = (1 - self.alpha) / (self.k + rank)
             rrf_scores[key] = rrf_scores.get(key, 0) + score
             all_docs[key] = doc
 
         # Add dense scores
         for rank, doc in enumerate(dense_results, start=1):
-            key = getattr(doc, 'doc_id', None) or getattr(doc, 'pmcid', None)
+            key = doc.pmcid
             score = self.alpha / (self.k + rank)
             rrf_scores[key] = rrf_scores.get(key, 0) + score
             all_docs[key] = doc
 
         # Sort by RRF score
-        sorted_keys = sorted(
+        sorted_pmcids = sorted(
             rrf_scores.keys(),
             key=lambda k: rrf_scores[k],
             reverse=True
@@ -66,9 +66,9 @@ class ParallelHybridRetriever:
 
         # Return ranked documents
         results = []
-        for key in sorted_keys:
-            doc = all_docs[key]
-            doc.rrf_score = rrf_scores[key]
+        for pmcid in sorted_pmcids:
+            doc = all_docs[pmcid]
+            doc.rrf_score = rrf_scores[pmcid]
             results.append(doc)
 
         return results

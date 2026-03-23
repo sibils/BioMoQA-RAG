@@ -284,7 +284,7 @@ class SIBILSRetriever:
                     title=source.get("title", ""),
                     abstract=source.get("abstract", ""),
                     full_text=source.get("full_text"),
-                    score=float(hit.get("_score") or 0.0),
+                    score=hit.get("_score", 0.0),
                     source=collection,
                     pmid=source.get("pmid"),
                     pmcid=source.get("pmcid"),
