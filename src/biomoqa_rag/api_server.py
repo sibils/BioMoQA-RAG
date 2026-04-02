@@ -288,8 +288,8 @@ def answer_question_post(
 @app.get("/api/QA", response_model=QAResponse)
 def answer_question_get(
     q: str = Query(..., description="Natural language question"),
-    col: Optional[str] = Query(default=None, description='Collection: "medline" or "plazi"'),
-    n: Optional[int] = Query(default=None, description="Number of documents to process (default: 5)"),
+    col: Optional[str] = Query(default=None, description='Collection to search: "medline", "plazi", "pmc", or "suppdata". Defaults to all collections.'),
+    n: Optional[int] = Query(default=None, description="Number of documents retrieved initially (default: 30). Higher values improve recall but slow down the response."),
     mode: str = Query(default="hybrid", description='Answer mode: "hybrid", "extractive", or "generative"'),
 ):
     """
