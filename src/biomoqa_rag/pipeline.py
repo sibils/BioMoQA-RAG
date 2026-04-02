@@ -42,6 +42,7 @@ class RAGConfig:
     retrieval_n: int = 30
     use_smart_retrieval: bool = True
     hybrid_alpha: float = 0.5
+    sibils_collections: List = None  # None = SIBILS default (medline + plazi)
 
     # Processing (streamlined)
     use_reranking: bool = True
@@ -140,6 +141,7 @@ class RAGPipeline:
         # Load retrievers
         print("Loading retrievers...")
         self.sibils = SIBILSRetriever(
+            collection=self.config.sibils_collections,
             cache_dir=self.config.sibils_cache_dir,
             cache_ttl=self.config.sibils_cache_ttl,
         )
@@ -331,6 +333,11 @@ class RAGPipeline:
             "snippet_end": None,
         }]
 
+    @property
+    def _default_collection_str(self) -> str:
+        c = self.sibils.collection
+        return '+'.join(c) if isinstance(c, list) else (c or 'medline+plazi')
+
     def _build_response(
         self,
         question: str,
@@ -347,7 +354,7 @@ class RAGPipeline:
             'success': True,
             'error': '',
             'question': question,
-            'collection': collection or 'medline+plazi',
+            'collection': collection or self._default_collection_str,
             'model': self._model_label(mode_used, self.config.model_name),
             'ndocs_requested': retrieval_n,
             'ndocs_returned_by_SIBiLS': num_retrieved,
@@ -503,7 +510,7 @@ class RAGPipeline:
                 'success': True,
                 'error': '',
                 'question': question,
-                'collection': collection or 'medline+plazi',
+                'collection': collection or self._default_collection_str,
                 'model': self._model_label(mode, self.config.model_name),
                 'ndocs_requested': retrieval_n,
                 'ndocs_returned_by_SIBiLS': 0,
@@ -567,7 +574,7 @@ class RAGPipeline:
             'success': True,
             'error': '',
             'question': question,
-            'collection': collection or 'medline+plazi',
+            'collection': collection or self._default_collection_str,
             'model': self._model_label(mode_used, self.config.model_name),
             'ndocs_requested': retrieval_n,
             'ndocs_returned_by_SIBiLS': num_retrieved,
