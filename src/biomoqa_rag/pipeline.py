@@ -257,14 +257,24 @@ class RAGPipeline:
 
     @staticmethod
     def _format_docid(doc) -> Optional[str]:
-        """Return the raw document identifier (PMID, Plazi ID, or PMC ID)."""
+        """Return the canonical document identifier based on collection source."""
+        source = getattr(doc, 'source', None)
+        if source == 'pmc':
+            pmcid = getattr(doc, 'pmcid', None)
+            if pmcid:
+                return pmcid if str(pmcid).startswith("PMC") else f"PMC{pmcid}"
+        if source == 'suppdata':
+            doc_id = getattr(doc, 'doc_id', None)
+            if doc_id and doc_id != 'unknown':
+                return str(doc_id)
+        # medline, plazi, faiss: prefer pmid, fallback to doc_id, then pmcid
         if getattr(doc, 'pmid', None):
             return str(doc.pmid)
         if getattr(doc, 'doc_id', None) and doc.doc_id != 'unknown':
             return str(doc.doc_id)
         if getattr(doc, 'pmcid', None):
             pmcid = doc.pmcid
-            return pmcid if pmcid.startswith("PMC") else f"PMC{pmcid}"
+            return pmcid if str(pmcid).startswith("PMC") else f"PMC{pmcid}"
         return None
 
     @staticmethod
