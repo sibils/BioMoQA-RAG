@@ -97,14 +97,27 @@ class ParallelHybridRetriever:
             future_dense = executor.submit(self.dense.retrieve, query, n)
 
             # Collect results
-            for future in as_completed([future_bm25, future_dense], timeout=self.timeout):
-                try:
-                    if future == future_bm25:
-                        bm25_results = future.result()
-                    else:
-                        dense_results = future.result()
-                except Exception as e:
-                    errors.append(str(e))
+            try:
+                for future in as_completed([future_bm25, future_dense], timeout=self.timeout):
+                    try:
+                        if future == future_bm25:
+                            bm25_results = future.result()
+                        else:
+                            dense_results = future.result()
+                    except Exception as e:
+                        errors.append(str(e))
+            except TimeoutError:
+                # One retriever timed out — use whatever finished
+                if future_bm25.done():
+                    try:
+                        bm25_results = future_bm25.result()
+                    except Exception as e:
+                        errors.append(str(e))
+                if future_dense.done():
+                    try:
+                        dense_results = future_dense.result()
+                    except Exception as e:
+                        errors.append(str(e))
 
         # Fallback if one method fails
         if not bm25_results and not dense_results:

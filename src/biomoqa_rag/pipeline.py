@@ -76,7 +76,7 @@ class RAGConfig:
 
     # Performance
     enable_parallel: bool = True
-    timeout: float = 10.0
+    timeout: float = 30.0
 
     @classmethod
     def cpu_config(cls, model_size: str = "3b") -> "RAGConfig":
