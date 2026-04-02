@@ -36,16 +36,18 @@ def build_biomedical_corpus():
     Queries are loaded from data/seed_queries.txt so they can be
     edited without touching the code.
     """
-    retriever = SIBILSRetriever()
+    collections = ["medline", "plazi", "pmc", "suppdata"]
+    retriever = SIBILSRetriever(collection=collections)
 
     seed_queries = load_seed_queries()
     print(f"Loaded {len(seed_queries)} seed queries from {SEED_QUERIES_FILE}")
+    print(f"Collections: {', '.join(collections)}")
 
     print(f"Building corpus from {len(seed_queries)} seed queries...")
-    print("This will take approximately 5-10 minutes...")
+    print("This will take approximately 10-20 minutes...")
     print()
 
-    all_documents = {}  # Use dict to deduplicate by PMCID
+    all_documents = {}  # Use dict to deduplicate by unique doc key
 
     for query in tqdm(seed_queries, desc="Querying SIBILS"):
         try:
@@ -53,9 +55,10 @@ def build_biomedical_corpus():
             results = retriever.retrieve(query, n=100)
 
             for doc in results:
-                if doc.pmcid not in all_documents:
-                    all_documents[doc.pmcid] = Document(
-                        pmcid=doc.pmcid,
+                key = doc.pmcid or doc.doc_id  # Plazi/suppdata docs have no pmcid
+                if key and key not in all_documents:
+                    all_documents[key] = Document(
+                        pmcid=doc.pmcid or doc.doc_id,
                         title=doc.title,
                         abstract=doc.abstract,
                         source=doc.source,
