@@ -38,7 +38,7 @@ class ParallelHybridRetriever:
         self.k = k
         self.timeout = timeout
 
-    def reciprocal_rank_fusion(self, bm25_results, dense_results):
+    def reciprocal_rank_fusion(self, bm25_results, dense_results, collection=None):
         """Combine results using RRF"""
         rrf_scores = {}
         all_docs = {}
@@ -50,8 +50,15 @@ class ParallelHybridRetriever:
             rrf_scores[key] = rrf_scores.get(key, 0) + score
             all_docs[key] = doc
 
-        # Add dense scores
+        # Normalise collection filter to a set of strings
+        allowed = None
+        if collection is not None:
+            allowed = set(collection) if isinstance(collection, list) else {collection}
+
+        # Add dense scores — skip FAISS docs not in the requested collection
         for rank, doc in enumerate(dense_results, start=1):
+            if allowed and getattr(doc, 'source', None) not in allowed:
+                continue
             key = getattr(doc, 'doc_id', None) or getattr(doc, 'pmcid', None)
             score = self.alpha / (self.k + rank)
             rrf_scores[key] = rrf_scores.get(key, 0) + score
@@ -132,7 +139,7 @@ class ParallelHybridRetriever:
             return bm25_results[:top_k]
 
         # Combine with RRF
-        hybrid_results = self.reciprocal_rank_fusion(bm25_results, dense_results)
+        hybrid_results = self.reciprocal_rank_fusion(bm25_results, dense_results, collection=collection)
 
         return hybrid_results[:top_k]
 
