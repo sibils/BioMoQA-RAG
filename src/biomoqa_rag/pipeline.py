@@ -257,24 +257,38 @@ class RAGPipeline:
 
     @staticmethod
     def _format_docid(doc) -> Optional[str]:
-        """Return the canonical document identifier based on collection source."""
+        """Return the canonical document identifier based on collection source.
+
+        - medline  → PMID
+        - pmc      → PMCID (e.g. PMC7824598)
+        - plazi    → Plazi treatment hex ID (the _id from elasticsearch)
+        - suppdata → full filename ID (e.g. PMC9700495_zr-43-977-S1.pdf)
+        - faiss    → PMID if available, else PMCID
+        """
         source = getattr(doc, 'source', None)
+        doc_id = getattr(doc, 'doc_id', None)
+        if doc_id == 'unknown':
+            doc_id = None
+
         if source == 'pmc':
             pmcid = getattr(doc, 'pmcid', None)
             if pmcid:
-                return pmcid if str(pmcid).startswith("PMC") else f"PMC{pmcid}"
-        if source == 'suppdata':
-            doc_id = getattr(doc, 'doc_id', None)
-            if doc_id and doc_id != 'unknown':
-                return str(doc_id)
-        # medline, plazi, faiss: prefer pmid, fallback to doc_id, then pmcid
-        if getattr(doc, 'pmid', None):
-            return str(doc.pmid)
-        if getattr(doc, 'doc_id', None) and doc.doc_id != 'unknown':
-            return str(doc.doc_id)
-        if getattr(doc, 'pmcid', None):
-            pmcid = doc.pmcid
-            return pmcid if str(pmcid).startswith("PMC") else f"PMC{pmcid}"
+                return str(pmcid) if str(pmcid).startswith("PMC") else f"PMC{pmcid}"
+            return doc_id  # fallback to _id (e.g. DOI)
+
+        if source in ('plazi', 'suppdata'):
+            # doc_id = elasticsearch _id, which is the canonical ID for both
+            return doc_id
+
+        # medline / faiss: prefer pmid
+        pmid = getattr(doc, 'pmid', None)
+        if pmid:
+            return str(pmid)
+        if doc_id:
+            return doc_id
+        pmcid = getattr(doc, 'pmcid', None)
+        if pmcid:
+            return str(pmcid) if str(pmcid).startswith("PMC") else f"PMC{pmcid}"
         return None
 
     @staticmethod
