@@ -125,6 +125,7 @@ class RAGPipeline:
 
     def __init__(self, config: RAGConfig = None):
         self.config = config or RAGConfig()
+        self._generation_lock = __import__("threading").Lock()
 
         print("="*80)
         print("Initializing BioMoQA RAG Pipeline")
@@ -640,7 +641,8 @@ class RAGPipeline:
             repetition_penalty=1.3,
         )
 
-        outputs = self.llm.generate([prompt], sampling_params)
+        with self._generation_lock:
+            outputs = self.llm.generate([prompt], sampling_params)
         text = outputs[0].outputs[0].text.strip()
         # Qwen3 sometimes emits chain-of-thought reasoning after its answer even
         # with the <think></think> prefix. Strip any <think>...</think> blocks,
