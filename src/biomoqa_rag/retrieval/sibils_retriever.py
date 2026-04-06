@@ -279,10 +279,14 @@ class SIBILSRetriever:
             for i, hit in enumerate(hits):
                 source = hit.get("_source", {})
 
+                # Plazi treatments store content in 'text' (not 'abstract')
+                plazi_text = source.get("text") or ""
+                plazi_title = source.get("treatment_title") or source.get("article-title") or ""
+
                 doc = Document(
                     doc_id=hit.get("_id", f"doc_{i}"),
-                    title=source.get("title", ""),
-                    abstract=source.get("abstract", ""),
+                    title=source.get("title") or plazi_title,
+                    abstract=source.get("abstract") or plazi_text,
                     full_text=source.get("full_text"),
                     score=float(hit.get("_score") or 0.0),
                     source=collection,
