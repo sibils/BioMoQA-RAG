@@ -325,6 +325,12 @@ class RAGPipeline:
                 question, documents, max_docs=final_n
             )
 
+        # Drop documents with no meaningful content (e.g. empty Plazi treatments)
+        documents = [
+            d for d in documents
+            if len((d.title + d.abstract).strip()) > 20
+        ]
+
         for d in documents:
             s = float(getattr(d, 'score', 0.0))
             source = getattr(d, 'source', 'faiss')
