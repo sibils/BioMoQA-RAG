@@ -344,11 +344,20 @@ class RAGPipeline:
     @staticmethod
     def _is_garbage(text: str) -> bool:
         """Return True if the generated text looks like degenerate output."""
+        import re
         if not text or len(text) < 5:
             return True
-        # Flag if more than 20% of characters are non-ASCII (e.g. Chinese, symbols)
+        # Any CJK/Hangul/Katakana characters — biomedical answers are in English
+        if re.search(r'[\u2e80-\u2eff\u3000-\u9fff\uac00-\ud7af\uf900-\ufaff]', text):
+            return True
+        # More than 10% non-ASCII characters (Cyrillic, Arabic, etc. mixed in)
         non_ascii = sum(1 for c in text if ord(c) > 127)
-        return non_ascii / len(text) > 0.2
+        if non_ascii / len(text) > 0.10:
+            return True
+        # Suspiciously long output (max_tokens=384 ≈ 1 500 chars; > 2 000 is runaway)
+        if len(text) > 2000:
+            return True
+        return False
 
     def _answers_from_generation(self, question: str, raw_text: str, documents: List, mode: str):
         """Build answers list from a vLLM-generated text string."""
