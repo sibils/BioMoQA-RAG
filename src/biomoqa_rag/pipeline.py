@@ -680,6 +680,7 @@ class RAGPipeline:
             max_tokens=self.config.max_tokens,
             top_p=0.9,
             repetition_penalty=1.3,
+            stop=["\n\n\n", "\nQuestion:", "\nNote:", "\nReferences:", "\nSources:"],
         )
 
         with self._generation_lock:
