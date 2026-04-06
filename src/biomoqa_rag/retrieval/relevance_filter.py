@@ -102,16 +102,20 @@ class FastRelevanceFilter:
     Fast keyword-based relevance filtering.
 
     Checks if document contains key terms from the question.
-    Much faster than LLM-based filtering but less accurate.
+    Uses prefix matching to handle plurals and suffixes (e.g.
+    "earthworm" matches "earthworms", "correlat" matches "correlated").
+    Always returns at least max_docs documents as fallback so BioBERT
+    is never left with an empty context.
     """
 
-    def __init__(self, min_overlap: float = 0.2):
-        """
-        Initialize fast filter.
+    STOP_WORDS = {
+        'what', 'is', 'the', 'are', 'of', 'in', 'a', 'an', 'and', 'or',
+        'for', 'to', 'from', 'by', 'with', 'at', 'on', 'how', 'why',
+        'when', 'where', 'who', 'which', 'does', 'do', 'can', 'has',
+        'have', 'been', 'was', 'were', 'that', 'this', 'it', 'its',
+    }
 
-        Args:
-            min_overlap: Minimum fraction of question keywords in document
-        """
+    def __init__(self, min_overlap: float = 0.15):
         self.min_overlap = min_overlap
 
     def filter_relevant(
@@ -120,38 +124,39 @@ class FastRelevanceFilter:
         documents: List[Document],
         max_docs: int = 20
     ) -> List[Document]:
-        """Filter by keyword overlap."""
-        if len(documents) == 0:
+        if not documents:
             return []
 
-        # Extract keywords from question (remove stop words)
-        stop_words = {'what', 'is', 'the', 'are', 'of', 'in', 'a', 'an', 'and',
-                     'or', 'for', 'to', 'from', 'by', 'with', 'at', 'on'}
+        # Extract keywords — truncate to 5 chars as a simple stemming proxy
+        # (e.g. "earthworms" → "earth", "correlated" → "corre")
+        # Use full word for short keywords (≤ 5 chars)
+        keywords = []
+        for w in re.findall(r'\w+', question):
+            w = w.lower()
+            if w not in self.STOP_WORDS and len(w) > 2:
+                keywords.append(w[:6] if len(w) > 6 else w)
 
-        question_words = set(
-            w.lower() for w in re.findall(r'\w+', question)
-            if w.lower() not in stop_words and len(w) > 2
-        )
-
-        if not question_words:
+        if not keywords:
             return documents[:max_docs]
 
-        # Score documents by keyword overlap
-        scored_docs = []
+        # Score each document by fraction of keywords found (prefix match)
+        scored = []
         for doc in documents:
             doc_text = f"{doc.title} {doc.abstract}".lower()
-            doc_words = set(re.findall(r'\w+', doc_text))
+            matches = sum(1 for kw in keywords if kw in doc_text)
+            score = matches / len(keywords)
+            scored.append((score, doc))
 
-            overlap = len(question_words & doc_words) / len(question_words)
+        scored.sort(reverse=True, key=lambda x: x[0])
 
-            if overlap >= self.min_overlap:
-                scored_docs.append((overlap, doc))
+        # Keep docs above threshold; always return at least max_docs as fallback
+        above = [doc for score, doc in scored if score >= self.min_overlap]
+        if len(above) >= max_docs:
+            return above[:max_docs]
 
-        # Sort by overlap (descending)
-        scored_docs.sort(reverse=True, key=lambda x: x[0])
-
-        # Return top max_docs
-        return [doc for score, doc in scored_docs[:max_docs]]
+        # Fallback: pad with next best docs to reach max_docs
+        below = [doc for score, doc in scored if score < self.min_overlap]
+        return (above + below)[:max_docs]
 
 
 class HybridRelevanceFilter:
