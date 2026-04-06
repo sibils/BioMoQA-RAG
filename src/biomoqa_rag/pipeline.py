@@ -341,6 +341,15 @@ class RAGPipeline:
 
         return documents, num_retrieved
 
+    @staticmethod
+    def _is_garbage(text: str) -> bool:
+        """Return True if the generated text looks like degenerate output."""
+        if not text or len(text) < 5:
+            return True
+        # Flag if more than 20% of characters are non-ASCII (e.g. Chinese, symbols)
+        non_ascii = sum(1 for c in text if ord(c) > 127)
+        return non_ascii / len(text) > 0.2
+
     def _answers_from_generation(self, question: str, raw_text: str, documents: List, mode: str):
         """Build answers list from a vLLM-generated text string."""
         import re
@@ -352,6 +361,8 @@ class RAGPipeline:
         if m:
             text = text[:m.start()].strip()
         clean_text = re.sub(r'\[\d+(?:\s*,\s*\d+)*\]', '', text).strip()
+        if self._is_garbage(clean_text):
+            return []
         top_doc = documents[0]
         return [{
             "answer": clean_text,
