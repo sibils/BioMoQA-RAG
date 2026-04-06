@@ -523,6 +523,9 @@ class RAGPipeline:
                 debug_info['filter_time'] = time.time() - t0
                 debug_info['filtered_count'] = len(documents)
 
+        # Drop documents with no meaningful content (e.g. empty Plazi treatments)
+        documents = [d for d in documents if len((d.title + d.abstract).strip()) > 20]
+
         # Normalize retrieval scores to [0, 1].
         # FAISS cosine scores are already in [0, 1].
         # BM25 scores can be >100 — cap at 200 and divide (covers typical range).
