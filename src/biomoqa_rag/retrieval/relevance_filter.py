@@ -101,11 +101,14 @@ class FastRelevanceFilter:
     """
     Fast keyword-based relevance filtering.
 
-    Checks if document contains key terms from the question.
-    Uses prefix matching to handle plurals and suffixes (e.g.
-    "earthworm" matches "earthworms", "correlat" matches "correlated").
-    Always returns at least max_docs documents as fallback so BioBERT
-    is never left with an empty context.
+    Scoring per document:
+    - Each question keyword contributes a weight (longer = rarer = more weight)
+    - A keyword "matches" if it appears verbatim OR its stem appears in the doc
+      (stem = first N-2 chars for words > 7 chars, avoids false positives)
+    - Title matches count double (stronger relevance signal)
+    - Score = weighted matches / total weight, normalised to [0, 1]
+    - Always returns max_docs documents (pads with lower-scoring docs so
+      BioBERT is never left with an empty context)
     """
 
     STOP_WORDS = {
@@ -113,10 +116,23 @@ class FastRelevanceFilter:
         'for', 'to', 'from', 'by', 'with', 'at', 'on', 'how', 'why',
         'when', 'where', 'who', 'which', 'does', 'do', 'can', 'has',
         'have', 'been', 'was', 'were', 'that', 'this', 'it', 'its',
+        'not', 'be', 'as', 'if', 'so', 'but', 'than', 'more', 'also',
     }
 
     def __init__(self, min_overlap: float = 0.15):
         self.min_overlap = min_overlap
+
+    @staticmethod
+    def _stem(word: str) -> str:
+        """Minimal suffix stripping — only for long words to avoid false positives."""
+        if len(word) > 7:
+            return word[:-2]  # "earthworms"→"earthwor", "correlated"→"correlate"
+        return word
+
+    @staticmethod
+    def _keyword_weight(word: str) -> float:
+        """Longer words are rarer and more informative."""
+        return 1.0 + len(word) * 0.1
 
     def filter_relevant(
         self,
@@ -127,34 +143,41 @@ class FastRelevanceFilter:
         if not documents:
             return []
 
-        # Extract keywords — truncate to 5 chars as a simple stemming proxy
-        # (e.g. "earthworms" → "earth", "correlated" → "corre")
-        # Use full word for short keywords (≤ 5 chars)
+        # Extract keywords with weights
         keywords = []
         for w in re.findall(r'\w+', question):
             w = w.lower()
             if w not in self.STOP_WORDS and len(w) > 2:
-                keywords.append(w[:6] if len(w) > 6 else w)
+                keywords.append((w, self._stem(w), self._keyword_weight(w)))
 
         if not keywords:
             return documents[:max_docs]
 
-        # Score each document by fraction of keywords found (prefix match)
+        total_weight = sum(weight for _, _, weight in keywords)
+
         scored = []
         for doc in documents:
-            doc_text = f"{doc.title} {doc.abstract}".lower()
-            matches = sum(1 for kw in keywords if kw in doc_text)
-            score = matches / len(keywords)
+            title = (doc.title or '').lower()
+            body = (doc.abstract or doc.full_text or '').lower()
+
+            weighted_score = 0.0
+            for word, stem, weight in keywords:
+                in_body = word in body or stem in body
+                in_title = word in title or stem in title
+                if in_title:
+                    weighted_score += weight * 2.0  # title boost
+                elif in_body:
+                    weighted_score += weight
+
+            score = min(weighted_score / (total_weight * 2.0), 1.0)
             scored.append((score, doc))
 
         scored.sort(reverse=True, key=lambda x: x[0])
 
-        # Keep docs above threshold; always return at least max_docs as fallback
         above = [doc for score, doc in scored if score >= self.min_overlap]
         if len(above) >= max_docs:
             return above[:max_docs]
 
-        # Fallback: pad with next best docs to reach max_docs
         below = [doc for score, doc in scored if score < self.min_overlap]
         return (above + below)[:max_docs]
 
