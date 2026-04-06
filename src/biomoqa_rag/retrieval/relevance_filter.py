@@ -158,7 +158,7 @@ class FastRelevanceFilter:
         scored = []
         for doc in documents:
             title = (doc.title or '').lower()
-            body = (doc.abstract or doc.full_text or '').lower()
+            body = (doc.abstract or getattr(doc, 'full_text', None) or '').lower()
 
             weighted_score = 0.0
             for word, stem, weight in keywords:

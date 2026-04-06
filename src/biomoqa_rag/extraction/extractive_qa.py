@@ -56,7 +56,10 @@ class BioExtractiveQA:
           - span_end (int): char offset within passage
           - passage (str): context fed to BioBERT (title + abstract, truncated)
         """
-        contexts = [f"{doc.title}. {doc.abstract}"[:max_context_length] for doc in documents]
+        contexts = [
+            ((doc.title.strip() + ". " if doc.title and doc.title.strip() else "") + (doc.abstract or ""))[:max_context_length]
+            for doc in documents
+        ]
         inputs = [{"question": question, "context": ctx} for ctx in contexts]
         results = self.qa(inputs, batch_size=len(inputs))
 

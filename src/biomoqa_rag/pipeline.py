@@ -328,7 +328,7 @@ class RAGPipeline:
         # Drop documents with no meaningful content (e.g. empty Plazi treatments)
         documents = [
             d for d in documents
-            if len((d.title + d.abstract).strip()) > 20
+            if len(((d.title or '') + (d.abstract or '')).strip()) > 20
         ]
 
         for d in documents:
@@ -370,7 +370,7 @@ class RAGPipeline:
             "docid": self._format_docid(top_doc),
             "doc_source": getattr(top_doc, 'source', 'faiss'),
             "doc_retrieval_score": round(float(getattr(top_doc, 'score', 0.0)), 3),
-            "doc_text": f"{top_doc.title}. {top_doc.abstract}"[:self.config.max_abstract_length],
+            "doc_text": ((top_doc.title.strip() + ". " if top_doc.title and top_doc.title.strip() else "") + (top_doc.abstract or ""))[:self.config.max_abstract_length],
             "snippet_start": None,
             "snippet_end": None,
         }]
@@ -535,7 +535,7 @@ class RAGPipeline:
                 debug_info['filtered_count'] = len(documents)
 
         # Drop documents with no meaningful content (e.g. empty Plazi treatments)
-        documents = [d for d in documents if len((d.title + d.abstract).strip()) > 20]
+        documents = [d for d in documents if len(((d.title or '') + (d.abstract or '')).strip()) > 20]
 
         # Normalize retrieval scores to [0, 1].
         # FAISS cosine scores are already in [0, 1].
