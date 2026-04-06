@@ -162,19 +162,22 @@ class SIBILSRetriever:
         n = n or self.default_n
         collection = collection or self.collection
 
-        # Multi-collection: query each and merge
+        # Multi-collection: query all collections in parallel then merge
         if isinstance(collection, list):
+            from concurrent.futures import ThreadPoolExecutor, as_completed
             all_docs: Dict[str, Document] = {}
-            for col in collection:
-                try:
-                    docs = self._retrieve_single(question, n, col)
-                    for doc in docs:
-                        # Keep higher-scored duplicate
-                        if doc.doc_id not in all_docs or doc.score > all_docs[doc.doc_id].score:
-                            all_docs[doc.doc_id] = doc
-                except Exception:
-                    # If one collection fails, continue with others
-                    continue
+            with ThreadPoolExecutor(max_workers=len(collection)) as executor:
+                futures = {executor.submit(self._retrieve_single, question, n, col): col
+                           for col in collection}
+                for future in as_completed(futures):
+                    try:
+                        docs = future.result()
+                        for doc in docs:
+                            # Keep higher-scored duplicate
+                            if doc.doc_id not in all_docs or doc.score > all_docs[doc.doc_id].score:
+                                all_docs[doc.doc_id] = doc
+                    except Exception:
+                        continue
             return sorted(all_docs.values(), key=lambda d: d.score, reverse=True)
 
         return self._retrieve_single(question, n, collection)
