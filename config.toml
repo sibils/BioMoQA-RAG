@@ -21,7 +21,7 @@ gpu_memory_utilization = 0.83
 quantization = "fp8"  # or null to disable
 
 [generation]
-max_tokens = 512
+max_tokens = 384
 temperature = 0.1
 
 [retrieval]

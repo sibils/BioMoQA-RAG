@@ -596,19 +596,7 @@ class RAGPipeline:
             raw_text = self._generate_vllm(self._build_prompt(question, documents)) \
                 if self.config.use_vllm \
                 else self._generate_cpu(self._build_prompt(question, documents))
-            import re
-            clean_text = re.sub(r'\[\d+(?:\s*,\s*\d+)*\]', '', raw_text).strip()
-            top_doc = documents[0]
-            answers.append({
-                "answer": clean_text,
-                "answer_score": None,
-                "docid": self._format_docid(top_doc),
-                "doc_source": getattr(top_doc, 'source', 'faiss'),
-                "doc_retrieval_score": round(float(getattr(top_doc, 'score', 0.0)), 3),
-                "doc_text": f"{top_doc.title}. {top_doc.abstract}"[:self.config.max_abstract_length],
-                "snippet_start": None,
-                "snippet_end": None,
-            })
+            answers = self._answers_from_generation(question, raw_text, documents, mode_used)
 
         if debug:
             debug_info['generation_time'] = round(time.time() - t0, 3)
