@@ -64,6 +64,7 @@ device = 0
 enabled = true
 min_overlap = 0.15
 final_n = 8
+min_extractive_score = 0.20  # BioBERT confidence threshold; below this falls back to generative
 
 [context]
 max_abstract_length = 1500

@@ -61,6 +61,7 @@ class RelevanceFilterConfig(BaseModel):
     enabled: bool = True
     min_overlap: float = 0.15
     final_n: int = 5
+    min_extractive_score: float = 0.20
 
 
 class ContextConfig(BaseModel):

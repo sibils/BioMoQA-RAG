@@ -113,6 +113,7 @@ def get_pipeline():
                 rerank_n=config.reranking.top_k,
                 use_relevance_filter=config.relevance_filter.enabled,
                 final_n=config.relevance_filter.final_n,
+                min_extractive_score=config.relevance_filter.min_extractive_score,
                 max_tokens=config.generation.max_tokens,
                 temperature=config.generation.temperature,
                 max_abstract_length=config.context.max_abstract_length,
