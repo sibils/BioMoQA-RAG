@@ -326,10 +326,33 @@ class RAGPipeline:
             )
 
         # Drop documents with no meaningful content (e.g. empty Plazi treatments)
-        documents = [
-            d for d in documents
-            if len(((d.title or '') + (d.abstract or '')).strip()) > 20
-        ]
+        # Also drop suppdata/pmc docs whose "abstract" is actually CSV/tabular data
+        # (bibliography spreadsheets score high on BM25 but BioBERT can't extract from them)
+        def _is_prose(doc) -> bool:
+            text = ((doc.title or '') + ' ' + (doc.abstract or ''))[:500]
+            if len(text.strip()) < 20:
+                return False
+            # CSV/tabular: high ratio of commas or tabs relative to letters
+            letters = sum(1 for c in text if c.isalpha())
+            commas = text.count(',') + text.count('\t')
+            if letters > 0 and commas / letters > 0.15:
+                return False
+            return True
+
+        documents = [d for d in documents if _is_prose(d)]
+
+        # Cap per-collection contribution so one collection can't flood all slots.
+        # suppdata/pmc can provide at most half of final_n; medline/plazi are uncapped.
+        from collections import defaultdict
+        col_counts: dict = defaultdict(int)
+        capped = []
+        for d in documents:
+            src = getattr(d, 'source', 'unknown')
+            limit = final_n // 2 if src in ('suppdata', 'pmc') else final_n
+            if col_counts[src] < limit:
+                capped.append(d)
+                col_counts[src] += 1
+        documents = capped
 
         for d in documents:
             s = float(getattr(d, 'score', 0.0))
