@@ -580,9 +580,9 @@ class RAGPipeline:
                 if mode == "hybrid":
                     mode_used = "hybrid:generative"
                 raw_text = (
-                    self._generate_vllm(self._build_prompt(question, col_docs))
+                    self._generate_vllm(self._build_messages(question, col_docs))
                     if self.config.use_vllm
-                    else self._generate_cpu(self._build_prompt(question, col_docs))
+                    else self._generate_cpu(self._build_messages(question, col_docs))
                 )
                 answers = self._answers_from_generation(question, raw_text, col_docs, mode_used)
 
@@ -689,9 +689,9 @@ class RAGPipeline:
         if mode == "generative" or (mode == "hybrid" and not answers):
             if mode == "hybrid":
                 mode_used = "hybrid:generative"
-            raw_text = self._generate_vllm(self._build_prompt(question, documents)) \
+            raw_text = self._generate_vllm(self._build_messages(question, documents)) \
                 if self.config.use_vllm \
-                else self._generate_cpu(self._build_prompt(question, documents))
+                else self._generate_cpu(self._build_messages(question, documents))
             answers = self._answers_from_generation(question, raw_text, documents, mode_used)
             if debug:
                 debug_info['raw_generated_text'] = raw_text
@@ -747,11 +747,13 @@ class RAGPipeline:
         cleaned = re.sub(r'[ \t]+', ' ', cleaned).strip()
         return cleaned
 
-    def _build_prompt(self, question: str, documents: List) -> str:
-        """Build the LLM prompt from question and retrieved documents."""
-        # Use llm_abstract_length (shorter than BioBERT's max_abstract_length) to keep
-        # the prompt within vLLM's max_model_len=4096.
-        # Budget: 8 docs × 600 chars × ~0.25 tokens/char ≈ 1200 tokens + 200 overhead = 1400 tokens.
+    def _build_messages(self, question: str, documents: List) -> List[dict]:
+        """Build chat messages for the LLM from question and retrieved documents.
+
+        Returns a list of message dicts (system + user) for use with llm.chat().
+        Uses llm_abstract_length (shorter than BioBERT's max_abstract_length) to
+        stay well within vLLM's max_model_len=4096.
+        """
         llm_limit = self.config.llm_abstract_length
         context_parts = []
         for i, doc in enumerate(documents):
@@ -761,9 +763,6 @@ class RAGPipeline:
             context_parts.append(f"[{i}] {docid}: {title}\n{abstract}")
 
         context = "\n\n".join(context_parts)
-        # Qwen3 chat format with thinking disabled.
-        # Pre-filling <think>\n\n</think> tells the model its thinking is done
-        # and it should output the answer directly, preventing reasoning leakage.
         system = (
             "You are a biomedical expert assistant. Answer the question based ONLY "
             "on the provided scientific sources. Be concise and factual (2-4 sentences). "
@@ -771,43 +770,43 @@ class RAGPipeline:
             "If the sources lack sufficient information, say so briefly. "
             "Always respond in English only."
         )
-        user = f"Sources:\n{context}\n\nQuestion: {question}"
-        return (
-            f"<|im_start|>system\n{system}<|im_end|>\n"
-            f"<|im_start|>user\n{user}<|im_end|>\n"
-            f"<|im_start|>assistant\n<think>\n\n</think>\n"
-        )
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"Sources:\n{context}\n\nQuestion: {question}"},
+        ]
 
-    def _generate_vllm(self, prompt: str) -> str:
-        """Generate with vLLM (GPU)"""
+    def _generate_vllm(self, messages: List[dict]) -> str:
+        """Generate with vLLM (GPU) using llm.chat() with Qwen3 thinking disabled.
+
+        llm.chat() applies the model's native chat template via chat_template_kwargs,
+        passing enable_thinking=False to properly suppress Qwen3's chain-of-thought
+        reasoning. This is the official vLLM API for Qwen3 thinking control and is
+        more reliable than the manual <think></think> prompt pre-fill approach.
+        """
         sampling_params = SamplingParams(
             temperature=self.config.temperature,
             max_tokens=self.config.max_tokens,
             top_p=0.9,
-            min_p=0.05,          # filter out very low-probability tokens; breaks degenerate loops
-            repetition_penalty=1.15,  # stronger than 1.05 but not 1.3 (which caused CJK drift)
+            min_p=0.05,
+            repetition_penalty=1.15,
             stop=["\n\n\n", "\nQuestion:", "\nNote:", "\nReferences:", "\nSources:"],
         )
 
         with self._generation_lock:
-            outputs = self.llm.generate([prompt], sampling_params)
-        text = outputs[0].outputs[0].text.strip()
-        # Qwen3 sometimes emits chain-of-thought reasoning after its answer even
-        # with the <think></think> prefix. Strip any <think>...</think> blocks,
-        # then cut at common reasoning openers if they appear mid-answer.
-        import re
-        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-        _reasoning_re = re.compile(
-            r"\n+(Okay[,.]|Let me |First[,.]|Moving to|Starting with|Let's tackle)",
-            re.IGNORECASE,
-        )
-        m = _reasoning_re.search(text)
-        if m:
-            text = text[:m.start()].strip()
-        return text
+            outputs = self.llm.chat(
+                messages,
+                sampling_params,
+                add_generation_prompt=True,
+                chat_template_kwargs={"enable_thinking": False},
+            )
+        return outputs[0].outputs[0].text.strip()
 
-    def _generate_cpu(self, prompt: str) -> str:
+    def _generate_cpu(self, messages: List[dict]) -> str:
         """Generate with transformers (CPU)"""
+        prompt = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=False,
+        )
         inputs = self.tokenizer(prompt, return_tensors="pt")
 
         with torch.no_grad():
