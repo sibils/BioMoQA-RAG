@@ -30,7 +30,7 @@ class SemanticReranker:
                        Alternative: cross-encoder/ms-marco-MedMarco-electra-base (slower, better)
         """
         print(f"Loading reranker: {model_name}")
-        self.model = CrossEncoder(model_name, device="cpu")
+        self.model = CrossEncoder(model_name, device=0)
         print("✓ Reranker loaded")
 
     def rerank(
@@ -107,7 +107,7 @@ class HybridReranker:
             bm25_weight: Weight for original BM25 scores (0-1)
             semantic_weight: Weight for semantic scores (0-1)
         """
-        self.model = CrossEncoder(model_name, device="cpu")
+        self.model = CrossEncoder(model_name, device=0)
         self.bm25_weight = bm25_weight
         self.semantic_weight = semantic_weight
 

@@ -221,7 +221,7 @@ class RAGPipeline:
             vllm_kwargs = {
                 "model": self.config.model_name,
                 "trust_remote_code": True,
-                "max_model_len": 8192,
+                "max_model_len": 4096,
                 "gpu_memory_utilization": self.config.gpu_memory_utilization,
                 "disable_log_stats": True,
             }

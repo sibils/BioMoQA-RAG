@@ -26,7 +26,7 @@ temperature = 0.1
 
 [retrieval]
 # Number of documents to retrieve initially
-retrieval_n = 30
+retrieval_n = 20
 
 # Use smart hybrid retrieval (SIBILS + FAISS)
 use_smart_retrieval = true
@@ -54,7 +54,7 @@ cache_ttl = 604800  # 7 days in seconds
 [reranking]
 enabled = true
 model = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-top_k = 15  # Higher recall when retrieval_n=50
+top_k = 10
 
 [extraction]
 # BioBERT device: 0 = GPU, -1 = CPU. GPU cuts inference from ~0.8s to ~0.05s.
