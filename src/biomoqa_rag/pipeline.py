@@ -731,17 +731,33 @@ class RAGPipeline:
 
         return response
 
+    @staticmethod
+    def _clean_for_llm(text: str) -> str:
+        """Strip non-ASCII characters from document text before passing to LLM.
+
+        OCR'd documents (suppdata) and non-English papers often contain garbled
+        characters that cause Qwen3 to generate degenerate multilingual output.
+        Replacing non-ASCII with a space keeps the prose readable while removing
+        the tokens that trigger language-switching in the model.
+        """
+        import re
+        # Replace non-ASCII with space, then collapse runs of whitespace
+        cleaned = re.sub(r'[^\x00-\x7F]+', ' ', text)
+        cleaned = re.sub(r'[ \t]+', ' ', cleaned).strip()
+        return cleaned
+
     def _build_prompt(self, question: str, documents: List) -> str:
         """Build the LLM prompt from question and retrieved documents."""
         context_parts = []
         for i, doc in enumerate(documents):
-            abstract = doc.abstract
+            abstract = self._clean_for_llm(doc.abstract or '')
             if self.config.truncate_abstracts:
                 abstract = abstract[:self.config.max_abstract_length]
                 if len(doc.abstract) > self.config.max_abstract_length:
                     abstract += "..."
+            title = self._clean_for_llm(doc.title or '')
             docid = self._format_docid(doc) or str(i)
-            context_parts.append(f"[{i}] {docid}: {doc.title}\n{abstract}")
+            context_parts.append(f"[{i}] {docid}: {title}\n{abstract}")
 
         context = "\n\n".join(context_parts)
         # Qwen3 chat format with thinking disabled.
@@ -767,7 +783,8 @@ class RAGPipeline:
             temperature=self.config.temperature,
             max_tokens=self.config.max_tokens,
             top_p=0.9,
-            repetition_penalty=1.05,
+            min_p=0.05,          # filter out very low-probability tokens; breaks degenerate loops
+            repetition_penalty=1.15,  # stronger than 1.05 but not 1.3 (which caused CJK drift)
             stop=["\n\n\n", "\nQuestion:", "\nNote:", "\nReferences:", "\nSources:"],
         )
 

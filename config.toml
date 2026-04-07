@@ -22,7 +22,7 @@ quantization = "fp8"  # or null to disable
 
 [generation]
 max_tokens = 300
-temperature = 0.1
+temperature = 0.2  # raised from 0.1 — greedy sampling causes degenerate repetition loops
 
 [retrieval]
 # Number of documents to retrieve initially
