@@ -671,10 +671,15 @@ class RAGPipeline:
         answers = []
 
         if mode in ("extractive", "hybrid"):
-            candidates = self.extractor.extract(
+            all_candidates = self.extractor.extract(
                 question, documents, self.config.max_abstract_length
             )
-            candidates = [c for c in candidates if c["score"] >= self.config.min_extractive_score]
+            if debug:
+                debug_info['biobert_scores'] = [
+                    {"score": round(c["score"], 4), "text": c["text"][:80], "source": getattr(documents[c["doc_idx"]], "source", "?")}
+                    for c in all_candidates[:10]
+                ]
+            candidates = [c for c in all_candidates if c["score"] >= self.config.min_extractive_score]
             if candidates:
                 mode_used = "extractive" if mode == "extractive" else "hybrid:extractive"
                 for cand in candidates:
