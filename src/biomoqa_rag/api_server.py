@@ -160,6 +160,23 @@ class AnswerItem(BaseModel):
     snippet_end: Optional[int]          # Char offset of answer span in doc_text
 
 
+class CollectionResult(BaseModel):
+    """Per-collection answer block, ordered by relevance rank."""
+    collection: str                      # "medline", "plazi", "pmc", "suppdata"
+    rank: int                            # 1 = best collection for this question
+    answers: List[AnswerItem]
+
+
+class MultiQAResponse(BaseModel):
+    """Response for /qa/multi — all collections ranked best-first."""
+    question: str
+    collection_results: List[CollectionResult]
+    mode_used: str
+    ndocs_retrieved: int
+    model: str
+    pipeline_time: Optional[float] = None
+
+
 class QAResponse(BaseModel):
     """Response format aligned with biodiversitypmc.sibils.org/api/QA."""
     sibils_version: str
@@ -330,6 +347,41 @@ def answer_batch(request: BatchRequest):
         collection=request.col,
     )
     return {"results": results, "count": len(results)}
+
+
+@app.post("/qa/multi", response_model=MultiQAResponse)
+def answer_question_multi(request: QuestionRequest):
+    """
+    Answer a question across all collections, ranked best-first.
+
+    Retrieves from all 4 collections (medline, plazi, pmc, suppdata) in a
+    single call, ranks collections by their best document's relevance score,
+    then generates answers sequentially so the frontend can display the most
+    relevant collection on the left.
+
+    This avoids the 4-concurrent-vLLM-calls problem of calling /qa once per
+    collection — generation is always sequential regardless of how many
+    frontend tabs are open.
+    """
+    try:
+        p = get_pipeline()
+        result = p.run_multi_collection(
+            question=request.question,
+            retrieval_n=request.retrieval_n,
+            final_n=request.final_n,
+            mode=request.mode,
+        )
+        return MultiQAResponse(**result)
+    except Exception as e:
+        logger.exception("Pipeline error in /qa/multi")
+        return MultiQAResponse(
+            question=request.question,
+            collection_results=[],
+            mode_used=request.mode,
+            ndocs_retrieved=0,
+            model="",
+            pipeline_time=None,
+        )
 
 
 @app.get("/retrieval-info")

@@ -384,6 +384,20 @@ class RAGPipeline:
             "snippet_end": None,
         }]
 
+    def _build_answer_from_candidate(self, cand: dict, documents: List) -> dict:
+        """Build an answer dict from an extractive QA candidate."""
+        doc = documents[cand["doc_idx"]]
+        return {
+            "answer": cand["text"],
+            "answer_score": round(cand["score"], 4),
+            "docid": self._format_docid(doc),
+            "doc_source": getattr(doc, 'source', 'faiss'),
+            "doc_retrieval_score": round(float(getattr(doc, 'score', 0.0)), 3),
+            "doc_text": cand["passage"],
+            "snippet_start": cand["span_start"],
+            "snippet_end": cand["span_end"],
+        }
+
     @property
     def _default_collection_str(self) -> str:
         c = self.sibils.collection
@@ -468,6 +482,102 @@ class RAGPipeline:
             ))
 
         return responses
+
+    def run_multi_collection(
+        self,
+        question: str,
+        retrieval_n: Optional[int] = None,
+        final_n: Optional[int] = None,
+        mode: str = "hybrid",
+    ) -> Dict:
+        """
+        Retrieve from all collections at once, rank them by document quality,
+        then generate answers sequentially (best collection first).
+
+        Returns a dict with `collection_results` ordered best-first so the
+        frontend can display them left-to-right by relevance.
+        """
+        from collections import defaultdict
+        start_time = time.time()
+        retrieval_n = retrieval_n or self.config.retrieval_n
+        final_n = final_n or self.config.final_n
+
+        # ── 1. Single retrieval pass across all collections ───────────────
+        # Ask for final_n * 4 so the relevance filter keeps enough docs for
+        # all collections after global reranking.
+        all_docs, num_retrieved = self._retrieve_and_prepare(
+            question, retrieval_n, final_n * 4, collection=None
+        )
+
+        if not all_docs:
+            return {
+                "question": question,
+                "collection_results": [],
+                "mode_used": mode,
+                "ndocs_retrieved": 0,
+                "model": self._model_label(mode, self.config.model_name),
+                "pipeline_time": round(time.time() - start_time, 3),
+            }
+
+        # ── 2. Group by source, rank collections by best doc score ────────
+        by_collection: Dict[str, List] = defaultdict(list)
+        for doc in all_docs:
+            by_collection[getattr(doc, 'source', 'unknown')].append(doc)
+
+        ranked_collections = sorted(
+            by_collection.items(),
+            key=lambda kv: float(getattr(kv[1][0], 'score', 0.0)) if kv[1] else 0.0,
+            reverse=True,
+        )
+
+        # ── 3. Per-collection QA — sequential, never concurrent vLLM ─────
+        collection_results = []
+        final_mode_used = mode
+
+        for rank, (col_name, col_docs) in enumerate(ranked_collections, 1):
+            col_docs = col_docs[:final_n]
+            if len(col_docs) < 2:
+                continue
+
+            answers = []
+            mode_used = mode
+
+            if mode in ("extractive", "hybrid"):
+                candidates = self.extractor.extract(
+                    question, col_docs, self.config.max_abstract_length
+                )
+                candidates = [c for c in candidates if c["score"] >= self.config.min_extractive_score]
+                if candidates:
+                    mode_used = "extractive" if mode == "extractive" else "hybrid:extractive"
+                    answers = [self._build_answer_from_candidate(c, col_docs) for c in candidates[:3]]
+
+            if mode == "generative" or (mode == "hybrid" and not answers):
+                if mode == "hybrid":
+                    mode_used = "hybrid:generative"
+                raw_text = (
+                    self._generate_vllm(self._build_prompt(question, col_docs))
+                    if self.config.use_vllm
+                    else self._generate_cpu(self._build_prompt(question, col_docs))
+                )
+                answers = self._answers_from_generation(question, raw_text, col_docs, mode_used)
+
+            if rank == 1:
+                final_mode_used = mode_used
+
+            collection_results.append({
+                "collection": col_name,
+                "rank": rank,
+                "answers": answers,
+            })
+
+        return {
+            "question": question,
+            "collection_results": collection_results,
+            "mode_used": final_mode_used,
+            "ndocs_retrieved": num_retrieved,
+            "model": self._model_label(final_mode_used, self.config.model_name),
+            "pipeline_time": round(time.time() - start_time, 3),
+        }
 
     def run(
         self,
@@ -587,17 +697,7 @@ class RAGPipeline:
             if candidates:
                 mode_used = "extractive" if mode == "extractive" else "hybrid:extractive"
                 for cand in candidates:
-                    doc = documents[cand["doc_idx"]]
-                    answers.append({
-                        "answer": cand["text"],
-                        "answer_score": round(cand["score"], 4),
-                        "docid": self._format_docid(doc),
-                        "doc_source": getattr(doc, 'source', 'faiss'),
-                        "doc_retrieval_score": round(float(getattr(doc, 'score', 0.0)), 3),
-                        "doc_text": cand["passage"],
-                        "snippet_start": cand["span_start"],
-                        "snippet_end": cand["span_end"],
-                    })
+                    answers.append(self._build_answer_from_candidate(cand, documents))
 
         if mode == "generative" or (mode == "hybrid" and not answers):
             if mode == "hybrid":
