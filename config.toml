@@ -21,7 +21,7 @@ gpu_memory_utilization = 0.83
 quantization = "fp8"  # or null to disable
 
 [generation]
-max_tokens = 200
+max_tokens = 300
 temperature = 0.1
 
 [retrieval]
@@ -58,7 +58,9 @@ top_k = 15
 
 [extraction]
 # BioBERT device: 0 = GPU, -1 = CPU. GPU cuts inference from ~0.8s to ~0.05s.
-device = 0
+# Set to -1 (CPU) to avoid CUDA OOM: vLLM holds 83% of GPU memory, leaving only ~3.4 GB
+# free. CrossEncoder was already moved to CPU for the same reason (commit a851656).
+device = -1
 
 [relevance_filter]
 enabled = true
