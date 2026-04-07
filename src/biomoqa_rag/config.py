@@ -66,6 +66,7 @@ class RelevanceFilterConfig(BaseModel):
 
 class ContextConfig(BaseModel):
     max_abstract_length: int = 800
+    llm_abstract_length: int = 600
     truncate_abstracts: bool = True
 
 

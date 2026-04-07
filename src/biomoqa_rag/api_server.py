@@ -117,6 +117,7 @@ def get_pipeline():
                 max_tokens=config.generation.max_tokens,
                 temperature=config.generation.temperature,
                 max_abstract_length=config.context.max_abstract_length,
+                llm_abstract_length=config.context.llm_abstract_length,
                 truncate_abstracts=config.context.truncate_abstracts,
                 quantization=config.model.quantization,
                 gpu_memory_utilization=config.model.gpu_memory_utilization,

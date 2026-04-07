@@ -69,7 +69,9 @@ final_n = 8
 min_extractive_score = 0.30  # BioBERT confidence threshold; below this falls back to generative
 
 [context]
-max_abstract_length = 1500
+max_abstract_length = 1500  # used by BioBERT extractive QA (needs full text for span extraction)
+llm_abstract_length = 600   # used by LLM generative prompt — keeps total prompt under max_model_len=4096
+                             # 8 docs × 600 chars × ~0.25 tok/char ≈ 1200 tokens, well within 4096
 truncate_abstracts = true
 
 [data]

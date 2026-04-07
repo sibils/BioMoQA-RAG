@@ -62,7 +62,8 @@ class RAGConfig:
     temperature: float = 0.1
 
     # Context optimization
-    max_abstract_length: int = 800  # ~200 words
+    max_abstract_length: int = 800  # ~200 words — used by BioBERT extractive QA
+    llm_abstract_length: int = 600  # shorter cap for LLM prompt to stay within max_model_len=4096
     truncate_abstracts: bool = True
 
     # Extractive QA (optional mode — lazy-loaded on first use)
@@ -748,13 +749,13 @@ class RAGPipeline:
 
     def _build_prompt(self, question: str, documents: List) -> str:
         """Build the LLM prompt from question and retrieved documents."""
+        # Use llm_abstract_length (shorter than BioBERT's max_abstract_length) to keep
+        # the prompt within vLLM's max_model_len=4096.
+        # Budget: 8 docs × 600 chars × ~0.25 tokens/char ≈ 1200 tokens + 200 overhead = 1400 tokens.
+        llm_limit = self.config.llm_abstract_length
         context_parts = []
         for i, doc in enumerate(documents):
-            abstract = self._clean_for_llm(doc.abstract or '')
-            if self.config.truncate_abstracts:
-                abstract = abstract[:self.config.max_abstract_length]
-                if len(doc.abstract) > self.config.max_abstract_length:
-                    abstract += "..."
+            abstract = self._clean_for_llm(doc.abstract or '')[:llm_limit]
             title = self._clean_for_llm(doc.title or '')
             docid = self._format_docid(doc) or str(i)
             context_parts.append(f"[{i}] {docid}: {title}\n{abstract}")
