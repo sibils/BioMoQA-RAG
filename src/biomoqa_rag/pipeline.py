@@ -746,7 +746,8 @@ class RAGPipeline:
             "You are a biomedical expert assistant. Answer the question based ONLY "
             "on the provided scientific sources. Be concise and factual (2-4 sentences). "
             "Cite sources using [0], [1], etc. after each claim. "
-            "If the sources lack sufficient information, say so briefly."
+            "If the sources lack sufficient information, say so briefly. "
+            "Always respond in English only."
         )
         user = f"Sources:\n{context}\n\nQuestion: {question}"
         return (
@@ -761,7 +762,7 @@ class RAGPipeline:
             temperature=self.config.temperature,
             max_tokens=self.config.max_tokens,
             top_p=0.9,
-            repetition_penalty=1.3,
+            repetition_penalty=1.05,
             stop=["\n\n\n", "\nQuestion:", "\nNote:", "\nReferences:", "\nSources:"],
         )
 
