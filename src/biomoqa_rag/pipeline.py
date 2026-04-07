@@ -687,6 +687,8 @@ class RAGPipeline:
                 if self.config.use_vllm \
                 else self._generate_cpu(self._build_prompt(question, documents))
             answers = self._answers_from_generation(question, raw_text, documents, mode_used)
+            if debug:
+                debug_info['raw_generated_text'] = raw_text
 
         if debug:
             debug_info['generation_time'] = round(time.time() - t0, 3)
