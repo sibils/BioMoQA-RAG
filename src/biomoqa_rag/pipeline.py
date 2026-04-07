@@ -638,58 +638,15 @@ class RAGPipeline:
 
         debug_info = {} if debug else None
 
-        # Step 1: Smart retrieval
+        # Steps 1-4: retrieval → reranking → filtering → score normalization
         t0 = time.time()
-        documents = self.retriever.retrieve(
-            question,
-            n=retrieval_n,
-            top_k=retrieval_n,
-            collection=collection,
+        documents, num_retrieved = self._retrieve_and_prepare(
+            question, retrieval_n, final_n, collection
         )
-        num_retrieved = len(documents)  # total before reranking/filtering
-        retrieval_time = time.time() - t0
-
         if debug:
-            debug_info['retrieval_time'] = round(retrieval_time, 3)
+            debug_info['retrieval_time'] = round(time.time() - t0, 3)
             debug_info['initial_count'] = num_retrieved
-
-        # Step 2: Optional reranking
-        if self.reranker and len(documents) > final_n:
-            t0 = time.time()
-            documents = self.reranker.rerank(
-                question,
-                documents,
-                top_k=min(self.config.rerank_n, len(documents))
-            )
-            if debug:
-                debug_info['rerank_time'] = time.time() - t0
-                debug_info['reranked_count'] = len(documents)
-
-        # Step 3: Fast relevance filtering
-        if self.relevance_filter and len(documents) > final_n:
-            t0 = time.time()
-            documents = self.relevance_filter.filter_relevant(
-                question,
-                documents,
-                max_docs=final_n
-            )
-            if debug:
-                debug_info['filter_time'] = time.time() - t0
-                debug_info['filtered_count'] = len(documents)
-
-        # Drop documents with no meaningful content (e.g. empty Plazi treatments)
-        documents = [d for d in documents if len(((d.title or '') + (d.abstract or '')).strip()) > 20]
-
-        # Normalize retrieval scores to [0, 1].
-        # FAISS cosine scores are already in [0, 1].
-        # BM25 scores can be >100 — cap at 200 and divide (covers typical range).
-        for d in documents:
-            s = float(getattr(d, 'score', 0.0))
-            source = getattr(d, 'source', 'faiss')
-            if source == 'faiss' or s <= 1.0:
-                d.score = round(min(s, 1.0), 4)
-            else:
-                d.score = round(min(s / 200.0, 1.0), 4)
+            debug_info['final_count'] = len(documents)
 
         # Step 4: Handle case where no relevant documents found
         if not documents:
@@ -733,7 +690,6 @@ class RAGPipeline:
 
         if debug:
             debug_info['generation_time'] = round(time.time() - t0, 3)
-            debug_info['final_count'] = len(documents)
 
         response = {
             'sibils_version': PIPELINE_VERSION,
