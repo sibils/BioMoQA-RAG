@@ -63,7 +63,7 @@ device = 0
 [relevance_filter]
 enabled = true
 min_overlap = 0.15
-final_n = 5
+final_n = 8
 
 [context]
 max_abstract_length = 800
