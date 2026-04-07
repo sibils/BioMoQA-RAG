@@ -342,13 +342,14 @@ class RAGPipeline:
         documents = [d for d in documents if _is_prose(d)]
 
         # Cap per-collection contribution so one collection can't flood all slots.
-        # suppdata/pmc can provide at most half of final_n; medline/plazi are uncapped.
+        # Any single non-medline collection is capped at final_n//2 slots.
+        # Medline is the primary prose source and is uncapped.
         from collections import defaultdict
         col_counts: dict = defaultdict(int)
         capped = []
         for d in documents:
             src = getattr(d, 'source', 'unknown')
-            limit = final_n // 2 if src in ('suppdata', 'pmc') else final_n
+            limit = final_n // 2 if src != 'medline' else final_n
             if col_counts[src] < limit:
                 capped.append(d)
                 col_counts[src] += 1
