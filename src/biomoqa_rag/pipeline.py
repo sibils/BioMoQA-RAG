@@ -919,10 +919,14 @@ class RAGPipeline:
             stop=["\nQuestion:", "\nNote:", "\nReferences:", "\nSources:"],
         )
 
-        # Append empty thinking block as assistant prefix; vLLM tokenizes
-        # <think> as the correct special token ID via its chat template
+        # Anchor generation to English by pre-filling the start of the answer.
+        # The empty thinking block + English prefix forces the model to continue
+        # in English rather than generating CJK garbage (fp8 distortion issue).
+        # With continue_final_message=True, outputs[0].outputs[0].text contains
+        # only the tokens generated AFTER the prefix — we prepend it back.
+        ENGLISH_PREFIX = "Based on the provided documents, "
         messages_with_prefix = list(messages) + [
-            {"role": "assistant", "content": "<think>\n\n</think>\n"}
+            {"role": "assistant", "content": f"<think>\n\n</think>\n{ENGLISH_PREFIX}"}
         ]
 
         with self._generation_lock:
@@ -932,7 +936,8 @@ class RAGPipeline:
                 continue_final_message=True,
                 add_generation_prompt=False,
             )
-        return outputs[0].outputs[0].text.strip()
+        continuation = outputs[0].outputs[0].text.strip()
+        return ENGLISH_PREFIX + continuation
 
     def _generate_cpu(self, messages: List[dict]) -> str:
         """Generate with transformers (CPU)"""
