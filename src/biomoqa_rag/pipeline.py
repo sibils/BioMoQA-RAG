@@ -926,7 +926,7 @@ class RAGPipeline:
         # only the tokens generated AFTER the prefix — we prepend it back.
         ENGLISH_PREFIX = "Based on the provided documents, "
         messages_with_prefix = list(messages) + [
-            {"role": "assistant", "content": f"<think>\n\n</think>\n{ENGLISH_PREFIX}"}
+            {"role": "assistant", "content": ENGLISH_PREFIX}
         ]
 
         with self._generation_lock:
