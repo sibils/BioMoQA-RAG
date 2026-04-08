@@ -167,6 +167,8 @@ class CollectionResult(BaseModel):
     collection: str                      # "medline", "plazi", "pmc", "suppdata"
     rank: int                            # 1 = best collection for this question
     answers: List[AnswerItem]
+    mode_used: Optional[str] = None
+    debug_info: Optional[Dict] = None
 
 
 class MultiQAResponse(BaseModel):
@@ -372,6 +374,7 @@ def answer_question_multi(request: QuestionRequest):
             retrieval_n=request.retrieval_n,
             final_n=request.final_n,
             mode=request.mode,
+            debug=request.debug,
         )
         return MultiQAResponse(**result)
     except Exception as e:

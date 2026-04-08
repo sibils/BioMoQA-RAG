@@ -515,16 +515,17 @@ class RAGPipeline:
         retrieval_n: Optional[int] = None,
         final_n: Optional[int] = None,
         mode: str = "hybrid",
+        debug: bool = False,
     ) -> Dict:
         """
         Retrieve independently per collection, then generate answers sequentially.
 
         Each collection gets its own retrieval pass with final_n document slots so
-        no single collection can crowd out others (the previous single-pool approach
-        caused suppdata/pmc ecology papers to fill all 8 slots, leaving medline with 0).
+        no single collection can crowd out others.
 
-        suppdata is handled with Option B: documents are returned directly as answers
-        without running BioBERT or the LLM (OCR'd suppdata text is unparseable).
+        suppdata uses Option B: docs returned directly as answers without QA.
+        suppdata retrieval runs in parallel with QA-collection retrieval, and its
+        result is built immediately (no LLM wait) so it never blocks QA latency.
 
         Returns a dict with `collection_results` ordered best-first.
         """
@@ -533,77 +534,103 @@ class RAGPipeline:
         retrieval_n = retrieval_n or self.config.retrieval_n
         final_n = final_n or self.config.final_n
 
-        collections = ["medline", "plazi", "pmc", "suppdata"]
+        qa_collections = ["medline", "plazi", "pmc"]
+        suppdata_final_n = 3  # suppdata: top 3 docs only (no QA needed)
 
-        # ── 1. Per-collection parallel retrieval (IO-bound: safe to thread) ──
+        # ── 1. All retrievals in parallel (IO-bound: safe to thread) ─────
+        # suppdata gets a smaller slot count since we just surface the docs.
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = {
+            qa_futures = {
                 col: pool.submit(self._retrieve_and_prepare, question, retrieval_n, final_n, col)
-                for col in collections
+                for col in qa_collections
             }
-            collection_docs = {col: fut.result() for col, fut in futures.items()}
+            supp_future = pool.submit(
+                self._retrieve_and_prepare, question, retrieval_n, suppdata_final_n, 'suppdata'
+            )
+            qa_docs = {col: fut.result() for col, fut in qa_futures.items()}
+            supp_docs, supp_n = supp_future.result()
 
-        total_retrieved = sum(n for _, n in collection_docs.values())
+        total_retrieved = sum(n for _, n in qa_docs.values()) + supp_n
 
-        # ── 2. Rank collections by their best-scoring document ────────────
-        ranked_collections = sorted(
-            [(col, docs) for col, (docs, _) in collection_docs.items() if docs],
+        # ── 2. suppdata result — instant, no LLM ─────────────────────────
+        suppdata_result = {
+            "collection": "suppdata",
+            "answers": self._suppdata_doc_answers(supp_docs),
+            "mode_used": "document",
+        }
+
+        # ── 3. Rank QA collections by their best-scoring document ─────────
+        ranked_qa = sorted(
+            [(col, docs) for col, (docs, _) in qa_docs.items() if docs],
             key=lambda kv: float(getattr(kv[1][0], 'score', 0.0)) if kv[1] else 0.0,
             reverse=True,
         )
 
-        if not ranked_collections:
-            return {
-                "question": question,
-                "collection_results": [],
-                "mode_used": mode,
-                "ndocs_retrieved": 0,
-                "model": self._model_label(mode, self.config.model_name),
-                "pipeline_time": round(time.time() - start_time, 3),
-            }
-
-        # ── 3. Per-collection QA — sequential, never concurrent vLLM ─────
-        collection_results = []
+        # ── 4. Per-QA-collection answers — sequential (vLLM lock) ─────────
+        qa_results = []
         final_mode_used = mode
 
-        for rank, (col_name, col_docs) in enumerate(ranked_collections, 1):
+        for col_name, col_docs in ranked_qa:
             answers = []
             mode_used = mode
+            col_debug = {}
 
-            # Option B: suppdata — return documents directly, skip QA
-            if col_name == 'suppdata':
-                answers = self._suppdata_doc_answers(col_docs)
-                mode_used = "document"
-            else:
-                if mode in ("extractive", "hybrid"):
-                    candidates = self.extractor.extract(
-                        question, col_docs, self.config.max_abstract_length
-                    )
-                    candidates = [c for c in candidates if c["score"] >= self.config.min_extractive_score]
-                    if candidates:
-                        mode_used = "extractive" if mode == "extractive" else "hybrid:extractive"
-                        answers = [self._build_answer_from_candidate(c, col_docs) for c in candidates[:3]]
+            if mode in ("extractive", "hybrid"):
+                candidates = self.extractor.extract(
+                    question, col_docs, self.config.max_abstract_length
+                )
+                if debug:
+                    col_debug['biobert_scores'] = [
+                        {"score": round(c["score"], 4), "text": c["text"][:80]}
+                        for c in candidates[:5]
+                    ]
+                candidates = [c for c in candidates if c["score"] >= self.config.min_extractive_score]
+                if candidates:
+                    mode_used = "extractive" if mode == "extractive" else "hybrid:extractive"
+                    answers = [self._build_answer_from_candidate(c, col_docs) for c in candidates[:3]]
 
-                if mode == "generative" or (mode == "hybrid" and not answers):
-                    if mode == "hybrid":
-                        mode_used = "hybrid:generative"
-                    raw_text = (
-                        self._generate_vllm(self._build_messages(question, col_docs))
-                        if self.config.use_vllm
-                        else self._generate_cpu(self._build_messages(question, col_docs))
-                    )
-                    answers = self._answers_from_generation(question, raw_text, col_docs, mode_used)
+            if mode == "generative" or (mode == "hybrid" and not answers):
+                if mode == "hybrid":
+                    mode_used = "hybrid:generative"
+                raw_text = (
+                    self._generate_vllm(self._build_messages(question, col_docs))
+                    if self.config.use_vllm
+                    else self._generate_cpu(self._build_messages(question, col_docs))
+                )
+                if debug:
+                    col_debug['raw_generated_text'] = raw_text
+                answers = self._answers_from_generation(question, raw_text, col_docs, mode_used)
 
-            if rank == 1:
+            if not qa_results:  # first QA collection = best ranked
                 final_mode_used = mode_used
 
-            collection_results.append({
-                "collection": col_name,
-                "rank": rank,
-                "answers": answers,
-            })
+            entry = {"collection": col_name, "answers": answers, "mode_used": mode_used}
+            if debug:
+                entry['debug_info'] = col_debug
+            qa_results.append(entry)
 
-        return {
+        # ── 5. Merge: rank all 4 collections, suppdata by best-doc score ──
+        # suppdata rank = based on its best doc score vs QA collections
+        supp_score = float(getattr(supp_docs[0], 'score', 0.0)) if supp_docs else 0.0
+        all_results = []
+        supp_inserted = False
+        for entry in qa_results:
+            col_name = entry['collection']
+            col_docs_list = qa_docs[col_name][0]
+            col_score = float(getattr(col_docs_list[0], 'score', 0.0)) if col_docs_list else 0.0
+            if not supp_inserted and supp_score >= col_score:
+                all_results.append(suppdata_result)
+                supp_inserted = True
+            all_results.append(entry)
+        if not supp_inserted:
+            all_results.append(suppdata_result)
+
+        # Add rank numbers
+        collection_results = [
+            {**entry, "rank": i + 1} for i, entry in enumerate(all_results)
+        ]
+
+        result = {
             "question": question,
             "collection_results": collection_results,
             "mode_used": final_mode_used,
@@ -611,6 +638,7 @@ class RAGPipeline:
             "model": self._model_label(final_mode_used, self.config.model_name),
             "pipeline_time": round(time.time() - start_time, 3),
         }
+        return result
 
     def run(
         self,
@@ -767,17 +795,23 @@ class RAGPipeline:
 
         suppdata documents are supplementary files (PDFs, spreadsheets) whose
         "abstract" is OCR'd text — BioBERT returns empty spans and the LLM
-        produces garbage.  Returning the document title + file ID as the answer
-        is more useful than running inference on unparseable content.
+        produces garbage.  The document title + abstract are returned as-is so
+        the frontend can display the full document context.
         """
         answers = []
         for doc in documents[:3]:
             title = (doc.title or '').strip()
             if not title:
                 continue
-            doc_text = (title + ". " + (doc.abstract or ""))[:self.config.max_abstract_length]
+            abstract = (doc.abstract or '').strip()
+            # answer = title for the primary display field; doc_text has the full content
+            # Include a brief abstract preview in the answer so the frontend has something
+            # meaningful to show even if it only renders the answer field.
+            abstract_preview = abstract[:300] if abstract else ''
+            answer_text = title + ('\n' + abstract_preview if abstract_preview else '')
+            doc_text = (title + '. ' + abstract)[:self.config.max_abstract_length]
             answers.append({
-                "answer": title,
+                "answer": answer_text,
                 "answer_score": None,
                 "docid": self._format_docid(doc),
                 "doc_source": "suppdata",
