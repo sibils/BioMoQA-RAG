@@ -599,7 +599,7 @@ class RAGPipeline:
                 )
                 if debug:
                     col_debug['biobert_scores'] = [
-                        {"score": round(c["score"], 4), "text": c["text"][:80]}
+                        {"score": float(round(c["score"], 4)), "text": c["text"][:80]}
                         for c in candidates[:5]
                     ]
                 candidates = [c for c in candidates if c["score"] >= self.config.min_extractive_score]
@@ -738,7 +738,7 @@ class RAGPipeline:
             )
             if debug:
                 debug_info['biobert_scores'] = [
-                    {"score": round(c["score"], 4), "text": c["text"][:80], "source": getattr(documents[c["doc_idx"]], "source", "?")}
+                    {"score": float(round(c["score"], 4)), "text": c["text"][:80], "source": getattr(documents[c["doc_idx"]], "source", "?")}
                     for c in all_candidates[:10]
                 ]
             candidates = [c for c in all_candidates if c["score"] >= self.config.min_extractive_score]
