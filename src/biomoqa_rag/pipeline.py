@@ -930,6 +930,7 @@ class RAGPipeline:
                 messages_with_prefix,
                 sampling_params,
                 continue_final_message=True,
+                add_generation_prompt=False,
             )
         return outputs[0].outputs[0].text.strip()
 
