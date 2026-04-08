@@ -388,7 +388,11 @@ class RAGPipeline:
     def _answers_from_generation(self, question: str, raw_text: str, documents: List, mode: str):
         """Build answers list from a vLLM-generated text string."""
         import re
+        # Strip complete <think>...</think> blocks (Qwen3 chain-of-thought)
         text = re.sub(r"<think>.*?</think>", "", raw_text, flags=re.DOTALL).strip()
+        # Handle truncated <think> without closing tag (thinking used all max_tokens)
+        if '<think>' in text:
+            text = text[:text.index('<think>')].strip()
         m = re.compile(
             r"\n+(Okay[,.]|Let me |First[,.]|Moving to|Starting with|Let's tackle)",
             re.IGNORECASE,
@@ -828,6 +832,10 @@ class RAGPipeline:
         Returns a list of message dicts (system + user) for use with llm.chat().
         Uses llm_abstract_length (shorter than BioBERT's max_abstract_length) to
         stay well within vLLM's max_model_len=4096.
+
+        `/no_think` at the end of the user message is Qwen3's soft switch for
+        disabling chain-of-thought reasoning at the tokenizer/template level.
+        This works regardless of vLLM version, unlike chat_template_kwargs.
         """
         llm_limit = self.config.llm_abstract_length
         context_parts = []
@@ -847,7 +855,8 @@ class RAGPipeline:
         )
         return [
             {"role": "system", "content": system},
-            {"role": "user", "content": f"Sources:\n{context}\n\nQuestion: {question}"},
+            # /no_think is Qwen3's soft switch — disables thinking at template level
+            {"role": "user", "content": f"Sources:\n{context}\n\nQuestion: {question}\n/no_think"},
         ]
 
     def _generate_vllm(self, messages: List[dict]) -> str:
@@ -864,7 +873,9 @@ class RAGPipeline:
             top_p=0.9,
             min_p=0.05,
             repetition_penalty=1.15,
-            stop=["\n\n\n", "\nQuestion:", "\nNote:", "\nReferences:", "\nSources:"],
+            # "\n\n\n" removed: Qwen3 thinking blocks use triple newlines internally,
+            # causing premature stop before </think> and leaving truncated think blocks.
+            stop=["\nQuestion:", "\nNote:", "\nReferences:", "\nSources:"],
         )
 
         with self._generation_lock:
