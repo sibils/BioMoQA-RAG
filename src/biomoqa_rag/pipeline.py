@@ -234,6 +234,20 @@ class RAGPipeline:
             self.llm = LLM(**vllm_kwargs)
             print("✓ vLLM model loaded (GPU)")
 
+            # Load tokenizer separately for prompt formatting.
+            # llm.chat() + chat_template_kwargs is unreliable across vLLM versions —
+            # the enable_thinking kwarg is silently ignored on some builds, causing
+            # Qwen3 to generate Chinese thinking tokens instead of answers.
+            # Formatting the prompt ourselves via apply_chat_template(enable_thinking=False)
+            # is the only approach that works regardless of vLLM version.
+            if not TRANSFORMERS_AVAILABLE:
+                raise ImportError("transformers is required for prompt formatting. Install with: pip install transformers")
+            from transformers import AutoTokenizer
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.config.model_name, trust_remote_code=True
+            )
+            print("✓ Tokenizer loaded for prompt formatting (enable_thinking=False)")
+
         # Extractive QA model — lazy-loaded on first use
         self._extractor = None
 
@@ -860,12 +874,13 @@ class RAGPipeline:
         ]
 
     def _generate_vllm(self, messages: List[dict]) -> str:
-        """Generate with vLLM (GPU) using llm.chat() with Qwen3 thinking disabled.
+        """Generate with vLLM (GPU) with Qwen3 thinking reliably disabled.
 
-        llm.chat() applies the model's native chat template via chat_template_kwargs,
-        passing enable_thinking=False to properly suppress Qwen3's chain-of-thought
-        reasoning. This is the official vLLM API for Qwen3 thinking control and is
-        more reliable than the manual <think></think> prompt pre-fill approach.
+        We format the prompt ourselves via tokenizer.apply_chat_template with
+        enable_thinking=False, then call llm.generate() with the raw string.
+        This bypasses llm.chat() + chat_template_kwargs which is silently ignored
+        on some vLLM builds, causing Qwen3 to generate Chinese thinking tokens
+        that fill max_tokens before any actual answer is produced.
         """
         sampling_params = SamplingParams(
             temperature=self.config.temperature,
@@ -873,18 +888,18 @@ class RAGPipeline:
             top_p=0.9,
             min_p=0.05,
             repetition_penalty=1.15,
-            # "\n\n\n" removed: Qwen3 thinking blocks use triple newlines internally,
-            # causing premature stop before </think> and leaving truncated think blocks.
             stop=["\nQuestion:", "\nNote:", "\nReferences:", "\nSources:"],
         )
 
+        prompt = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+
         with self._generation_lock:
-            outputs = self.llm.chat(
-                messages,
-                sampling_params,
-                add_generation_prompt=True,
-                chat_template_kwargs={"enable_thinking": False},
-            )
+            outputs = self.llm.generate([prompt], sampling_params)
         return outputs[0].outputs[0].text.strip()
 
     def _generate_cpu(self, messages: List[dict]) -> str:
