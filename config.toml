@@ -10,8 +10,10 @@ log_level = "info"
 # Inference mode: "gpu", "gpu_small", or "cpu"
 mode = "gpu"
 
-# Model name for GPU mode (Qwen3-8B fits in 20GB MIG with fp8, ~8GB weights)
-model_name = "Qwen/Qwen3-8B"
+# Pre-quantized FP8 model — required on A100 (compute cap 8.0).
+# Dynamic fp8 on base Qwen3-8B is broken on A100 with vLLM 0.19.0 (garbage output).
+# Pre-quantized weights use W8A16 Marlin path on A100 correctly. Same ~8GB footprint.
+model_name = "Qwen/Qwen3-8B-FP8"
 
 # Model size for CPU mode: "0.5b", "1.5b", "3b", "7b"
 size = "8b"
