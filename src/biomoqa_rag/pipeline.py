@@ -872,43 +872,14 @@ class RAGPipeline:
             {"role": "user", "content": f"Sources:\n{context}\n\nQuestion: {question}"},
         ]
 
-    @staticmethod
-    def _build_chatml_prompt(messages: List[dict]) -> str:
-        """Format messages as Qwen3 ChatML WITHOUT a thinking prefix.
-
-        Bypasses apply_chat_template entirely. Every previous approach
-        (chat_template_kwargs, /no_think, enable_thinking=False, stripping
-        <think> suffix) failed because the thinking token on this server is
-        not the literal string '<think>' — it is a special token ID that
-        apply_chat_template renders differently. Building the prompt string
-        directly guarantees no thinking prefix is ever present.
-
-        Qwen3 ChatML format:
-            <|im_start|>system\\n{content}<|im_end|>\\n
-            <|im_start|>user\\n{content}<|im_end|>\\n
-            <|im_start|>assistant\\n          ← generation starts here, no <think>
-        """
-        parts = []
-        for msg in messages:
-            parts.append(f"<|im_start|>{msg['role']}\n{msg['content']}<|im_end|>\n")
-        # Pre-fill an empty <think> block so the model treats thinking as done
-        # and generates the answer directly. Required for Qwen3 with fp8 on this
-        # hardware — without it the model generates CJK garbage from token 1.
-        parts.append("<|im_start|>assistant\n<think>\n\n</think>\n")
-        return "".join(parts)
-
     def _generate_vllm(self, messages: List[dict]) -> str:
-        """Generate with vLLM (GPU) using llm.chat() with continue_final_message.
+        """Generate with vLLM (GPU).
 
-        We append an assistant message containing the empty <think></think> block
-        and pass continue_final_message=True so vLLM's chat template tokenizes
-        the thinking tokens correctly (as special token IDs, not raw text).
-        This is the proper vLLM API for assistant pre-filling and works in 0.19.0.
-
-        History of failed attempts: chat_template_kwargs enable_thinking=False,
-        /no_think in message, _strip_think_prefix, _build_chatml_prompt with
-        raw string <think> — all failed because string prompts do not tokenize
-        <think> as the special token ID in vLLM 0.19.0.
+        Pre-fills the assistant turn with an English phrase so the model
+        generates a continuation rather than starting from scratch. This
+        bypasses Qwen3 thinking mode (no <think> block fires) and anchors
+        the output to English. The prefix is prepended to the stripped
+        continuation before returning.
         """
         sampling_params = SamplingParams(
             temperature=self.config.temperature,
@@ -919,10 +890,8 @@ class RAGPipeline:
             stop=["\nQuestion:", "\nNote:", "\nReferences:", "\nSources:"],
         )
 
-        # Anchor generation to English by pre-filling the start of the answer.
-        # The empty thinking block + English prefix forces the model to continue
-        # in English rather than generating CJK garbage (fp8 distortion issue).
-        # With continue_final_message=True, outputs[0].outputs[0].text contains
+        # Pre-fill the assistant turn so the model continues an English sentence.
+        # continue_final_message=True means outputs[0].outputs[0].text contains
         # only the tokens generated AFTER the prefix — we prepend it back.
         ENGLISH_PREFIX = "Based on the provided documents, "
         messages_with_prefix = list(messages) + [

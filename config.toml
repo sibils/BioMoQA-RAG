@@ -23,7 +23,7 @@ gpu_memory_utilization = 0.83
 quantization = "fp8"  # or null to disable
 
 [generation]
-max_tokens = 500  # raised from 300: if Qwen3 thinking fires, 200 tokens for think + 300 for answer
+max_tokens = 500
 temperature = 0.2  # raised from 0.1 — greedy sampling causes degenerate repetition loops
 
 [retrieval]
