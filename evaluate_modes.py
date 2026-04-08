@@ -161,7 +161,7 @@ def main():
     # Resume: skip already-done rows
     done_ids = set()
     if args.resume and output_path.exists():
-        existing = pd.read_csv(output_path)
+        existing = pd.read_csv(output_path, on_bad_lines="skip")
         done_ids = set(zip(existing["question_id"], existing["mode"]))
         print(f"Resuming: {len(done_ids)} rows already done")
 
@@ -181,7 +181,7 @@ def main():
         "f1", "rouge1", "rouge2", "rougeL",
         "pipeline_time_seconds",
     ]
-    writer = csv.DictWriter(out_file, fieldnames=fieldnames)
+    writer = csv.DictWriter(out_file, fieldnames=fieldnames, quoting=csv.QUOTE_ALL)
     if write_header:
         writer.writeheader()
 
@@ -236,7 +236,7 @@ def main():
     # ---------------------------------------------------------------------------
     # Summary table
     # ---------------------------------------------------------------------------
-    results = pd.read_csv(output_path)
+    results = pd.read_csv(output_path, on_bad_lines="skip")
     results = results[results["mode"].isin(args.modes)]
 
     print("\n" + "=" * 70)
