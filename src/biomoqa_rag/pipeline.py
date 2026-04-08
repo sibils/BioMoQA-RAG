@@ -873,14 +873,30 @@ class RAGPipeline:
             {"role": "user", "content": f"Sources:\n{context}\n\nQuestion: {question}\n/no_think"},
         ]
 
+    @staticmethod
+    def _strip_think_prefix(prompt: str) -> str:
+        """Remove any trailing <think> suffix added by the chat template.
+
+        Some tokenizer/vLLM versions ignore enable_thinking=False and still
+        append '<think>\\n' to the generation prompt. llm.generate() then
+        starts decoding from inside the thinking block, producing CJK garbage
+        with no visible <think> tag in the output (it's already in the prompt).
+        Stripping it here guarantees the model starts generating the answer directly.
+        """
+        for suffix in ('<think>\n', '<think>'):
+            if prompt.endswith(suffix):
+                return prompt[:-len(suffix)]
+        return prompt
+
     def _generate_vllm(self, messages: List[dict]) -> str:
         """Generate with vLLM (GPU) with Qwen3 thinking reliably disabled.
 
-        We format the prompt ourselves via tokenizer.apply_chat_template with
-        enable_thinking=False, then call llm.generate() with the raw string.
-        This bypasses llm.chat() + chat_template_kwargs which is silently ignored
-        on some vLLM builds, causing Qwen3 to generate Chinese thinking tokens
-        that fill max_tokens before any actual answer is produced.
+        Format prompt via tokenizer.apply_chat_template, then explicitly strip
+        any trailing <think> prefix before calling llm.generate(). This is the
+        only approach guaranteed to work across all tokenizer/vLLM versions:
+        enable_thinking=False, /no_think in message, and chat_template_kwargs
+        are all silently ignored on some builds. Direct prompt surgery is the
+        guaranteed fallback.
         """
         sampling_params = SamplingParams(
             temperature=self.config.temperature,
@@ -897,6 +913,7 @@ class RAGPipeline:
             add_generation_prompt=True,
             enable_thinking=False,
         )
+        prompt = self._strip_think_prefix(prompt)
 
         with self._generation_lock:
             outputs = self.llm.generate([prompt], sampling_params)
