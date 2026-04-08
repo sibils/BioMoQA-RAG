@@ -898,11 +898,17 @@ class RAGPipeline:
         return "".join(parts)
 
     def _generate_vllm(self, messages: List[dict]) -> str:
-        """Generate with vLLM (GPU) using manually formatted ChatML prompt.
+        """Generate with vLLM (GPU) using llm.chat() with continue_final_message.
 
-        Uses _build_chatml_prompt() instead of apply_chat_template() to
-        guarantee no <think> prefix in the generation prompt. All tokenizer-
-        and vLLM-level thinking controls have proven unreliable on this server.
+        We append an assistant message containing the empty <think></think> block
+        and pass continue_final_message=True so vLLM's chat template tokenizes
+        the thinking tokens correctly (as special token IDs, not raw text).
+        This is the proper vLLM API for assistant pre-filling and works in 0.19.0.
+
+        History of failed attempts: chat_template_kwargs enable_thinking=False,
+        /no_think in message, _strip_think_prefix, _build_chatml_prompt with
+        raw string <think> — all failed because string prompts do not tokenize
+        <think> as the special token ID in vLLM 0.19.0.
         """
         sampling_params = SamplingParams(
             temperature=self.config.temperature,
@@ -913,10 +919,18 @@ class RAGPipeline:
             stop=["\nQuestion:", "\nNote:", "\nReferences:", "\nSources:"],
         )
 
-        prompt = self._build_chatml_prompt(messages)
+        # Append empty thinking block as assistant prefix; vLLM tokenizes
+        # <think> as the correct special token ID via its chat template
+        messages_with_prefix = list(messages) + [
+            {"role": "assistant", "content": "<think>\n\n</think>\n"}
+        ]
 
         with self._generation_lock:
-            outputs = self.llm.generate([prompt], sampling_params)
+            outputs = self.llm.chat(
+                messages_with_prefix,
+                sampling_params,
+                continue_final_message=True,
+            )
         return outputs[0].outputs[0].text.strip()
 
     def _generate_cpu(self, messages: List[dict]) -> str:
