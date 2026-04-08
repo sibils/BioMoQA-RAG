@@ -891,7 +891,10 @@ class RAGPipeline:
         parts = []
         for msg in messages:
             parts.append(f"<|im_start|>{msg['role']}\n{msg['content']}<|im_end|>\n")
-        parts.append("<|im_start|>assistant\n")
+        # Pre-fill an empty <think> block so the model treats thinking as done
+        # and generates the answer directly. Required for Qwen3 with fp8 on this
+        # hardware — without it the model generates CJK garbage from token 1.
+        parts.append("<|im_start|>assistant\n<think>\n\n</think>\n")
         return "".join(parts)
 
     def _generate_vllm(self, messages: List[dict]) -> str:
