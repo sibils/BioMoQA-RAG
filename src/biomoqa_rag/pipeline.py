@@ -424,9 +424,11 @@ class RAGPipeline:
         ))
         if not cited_indices:
             cited_indices = [0]
+        # First item carries the answer text; subsequent items are doc-only (answer="")
+        # so the frontend renders the answer once and all cited docs below it.
         return [
             {
-                "answer": clean_text,
+                "answer": clean_text if i == 0 else "",
                 "answer_score": None,
                 "docid": self._format_docid(documents[idx]),
                 "doc_source": getattr(documents[idx], 'source', 'faiss'),
@@ -435,7 +437,7 @@ class RAGPipeline:
                 "snippet_start": None,
                 "snippet_end": None,
             }
-            for idx in cited_indices
+            for i, idx in enumerate(cited_indices)
         ]
 
     def _build_answer_from_candidate(self, cand: dict, documents: List) -> dict:
