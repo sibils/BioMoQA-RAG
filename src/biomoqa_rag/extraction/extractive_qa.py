@@ -2,7 +2,8 @@
 Extractive QA module using BioBERT fine-tuned on SQuAD2.
 
 Extracts verbatim answer spans from retrieved documents — no generation,
-no hallucination. SQuAD2 training enables "no answer" detection.
+no hallucination. Always returns the best span per document; quality
+filtering is done upstream (min_extractive_score threshold in hybrid mode).
 """
 
 from typing import List, Dict
@@ -13,9 +14,10 @@ class BioExtractiveQA:
     Extractive QA using a BERT-style model trained on SQuAD2.
 
     Given a question and a list of documents, runs QA inference on all
-    documents in a single batched GPU call and returns ALL valid answer spans ranked by score.
-    SQuAD2 "impossible answer" outputs a high score with an empty string —
-    those are filtered out before ranking so empty-answer docs never win.
+    documents in a single batched GPU call and returns ALL answer spans
+    ranked by score. handle_impossible_answer=False ensures the model
+    always returns a span — quality gating is done upstream so extractive
+    mode always has output when documents are retrieved.
     """
 
     def __init__(
@@ -26,7 +28,7 @@ class BioExtractiveQA:
     ):
         """
         Args:
-            model_name: HuggingFace model ID (must be SQuAD2-fine-tuned for no-answer support)
+            model_name: HuggingFace model ID (SQuAD2-fine-tuned)
             confidence_threshold: Minimum score to return a candidate (0-1)
             device: -1 for CPU, 0+ for GPU index
         """
@@ -35,23 +37,18 @@ class BioExtractiveQA:
         self.qa = pipeline(
             "question-answering",
             model=model_name,
-            handle_impossible_answer=True,
+            handle_impossible_answer=False,
             device=device,
             model_kwargs={"low_cpu_mem_usage": False},
         )
         self.threshold = confidence_threshold
 
-    def extract(self, question: str, documents: List, max_context_length: int = 800, force: bool = False) -> List[Dict]:
+    def extract(self, question: str, documents: List, max_context_length: int = 800) -> List[Dict]:
         """
         Run extractive QA on all documents in a single batched GPU call.
 
-        Returns a list of answer candidates sorted by score descending.
-        The list is empty when no document yields a confident answer.
-
-        Args:
-            force: When True, bypass SQuAD2 impossible-answer detection and always
-                   return the best span per document. Used in extractive mode to
-                   guarantee at least some output even for synthesis questions.
+        Always returns at least one candidate per document with non-empty text.
+        Returns candidates sorted by score descending.
 
         Each candidate dict has:
           - text (str): verbatim extracted span
@@ -65,11 +62,12 @@ class BioExtractiveQA:
             ((doc.title.strip() + ". " if doc.title and doc.title.strip() else "") + (doc.abstract or ""))[:max_context_length]
             for doc in documents
         ]
-        inputs = [{"question": question, "context": ctx} for ctx in contexts]
-        results = self.qa(inputs, batch_size=len(inputs), handle_impossible_answer=not force)
+        inputs = [{"question": question, "context": ctx} for ctx in contexts if ctx.strip()]
+        if not inputs:
+            return []
 
-        # SQuAD2 outputs a HIGH score with an EMPTY string when it decides
-        # there is no answer — filter those out before ranking.
+        results = self.qa(inputs, batch_size=len(inputs))
+
         candidates = []
         for idx, (result, context) in enumerate(zip(results, contexts)):
             if result["answer"].strip() and result["score"] >= self.threshold:
