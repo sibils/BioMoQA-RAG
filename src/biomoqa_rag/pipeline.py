@@ -837,8 +837,7 @@ class RAGPipeline:
             # answer = title for the primary display field; doc_text has the full content
             # Include a brief abstract preview in the answer so the frontend has something
             # meaningful to show even if it only renders the answer field.
-            abstract_preview = abstract[:300] if abstract else ''
-            answer_text = title + ('\n' + abstract_preview if abstract_preview else '')
+            answer_text = title
             doc_text = (title + '. ' + abstract)[:self.config.max_abstract_length]
             answers.append({
                 "answer": answer_text,
