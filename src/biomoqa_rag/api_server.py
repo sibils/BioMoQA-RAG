@@ -277,33 +277,35 @@ def _run_qa(
         )
 
 
-@app.post("/qa", response_model=QAResponse)
-def answer_question_post(
-    request: QuestionRequest,
-    col: Optional[str] = Query(default=None, description='SIBILS collection: "medline", "plazi", "pmc", or "suppdata"'),
-):
+@app.post("/qa", response_model=MultiQAResponse)
+def answer_question_post(request: QuestionRequest):
     """
-    Answer a biomedical question (POST).
+    Answer a biomedical question across all collections (POST).
 
-    `mode` in the request body controls the answer strategy:
-    - `"hybrid"` (default): BioBERT extractive span; LLM fallback when not confident
-    - `"extractive"`: verbatim span only, never hallucinates
-    - `"generative"`: LLM always synthesises an answer
-
-    Response mirrors the `biodiversitypmc.sibils.org/api/QA` format:
-    `answers` is a ranked list of candidates with `snippet_start`/`snippet_end`
-    offsets into `doc_text` for client-side passage highlighting.
+    Temporarily routes to multi-collection pipeline so the frontend receives
+    collection_results in one request instead of 4 separate calls that queue
+    behind the vLLM lock. Revert once frontend switches to /qa/multi.
     """
-    return _run_qa(
-        question=request.question,
-        col=col,
-        n=None,
-        mode=request.mode,
-        include_documents=request.include_documents,
-        debug=request.debug,
-        retrieval_n=request.retrieval_n,
-        final_n=request.final_n,
-    )
+    try:
+        p = get_pipeline()
+        result = p.run_multi_collection(
+            question=request.question,
+            retrieval_n=request.retrieval_n,
+            final_n=request.final_n,
+            mode=request.mode,
+            debug=request.debug,
+        )
+        return MultiQAResponse(**result)
+    except Exception as e:
+        logger.exception("Pipeline error in /qa")
+        return MultiQAResponse(
+            question=request.question,
+            collection_results=[],
+            mode_used=request.mode,
+            ndocs_retrieved=0,
+            model="",
+            pipeline_time=None,
+        )
 
 
 @app.get("/api/QA", response_model=QAResponse)
