@@ -55,8 +55,58 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict
 
+import threading
+import time as _time
 from .config import get_config
 from .pipeline import RAGPipeline, RAGConfig
+
+
+# Per-question cache for multi-collection results.
+# The frontend calls /qa 4× in parallel (one per collection tab).
+# The first call runs the full pipeline and caches; the other 3 wait and
+# return from cache immediately, avoiding 4× sequential vLLM generations.
+_multi_cache: dict = {}           # (question, mode) -> (result, timestamp)
+_multi_in_flight: dict = {}       # (question, mode) -> threading.Event
+_multi_cache_mutex = threading.Lock()
+_MULTI_CACHE_TTL = 120            # seconds
+
+
+def _get_or_run_multi(pipeline, question, mode, retrieval_n, final_n, debug):
+    key = (question, mode)
+    with _multi_cache_mutex:
+        if key in _multi_cache:
+            result, ts = _multi_cache[key]
+            if _time.time() - ts < _MULTI_CACHE_TTL:
+                return result
+        if key in _multi_in_flight:
+            event = _multi_in_flight[key]
+            is_runner = False
+        else:
+            event = threading.Event()
+            _multi_in_flight[key] = event
+            is_runner = True
+    if is_runner:
+        try:
+            result = pipeline.run_multi_collection(
+                question=question, retrieval_n=retrieval_n,
+                final_n=final_n, mode=mode, debug=debug,
+            )
+            with _multi_cache_mutex:
+                _multi_cache[key] = (result, _time.time())
+                _multi_in_flight.pop(key, None)
+            event.set()
+            return result
+        except Exception:
+            with _multi_cache_mutex:
+                _multi_in_flight.pop(key, None)
+            event.set()
+            raise
+    else:
+        event.wait(timeout=180)
+        with _multi_cache_mutex:
+            if key in _multi_cache:
+                return _multi_cache[key][0]
+        raise RuntimeError("Multi-collection computation did not complete")
 
 # Load configuration
 config = get_config()
@@ -288,11 +338,12 @@ def answer_question_post(request: QuestionRequest):
     """
     try:
         p = get_pipeline()
-        result = p.run_multi_collection(
+        result = _get_or_run_multi(
+            p,
             question=request.question,
+            mode=request.mode,
             retrieval_n=request.retrieval_n,
             final_n=request.final_n,
-            mode=request.mode,
             debug=request.debug,
         )
         return MultiQAResponse(**result)
