@@ -416,17 +416,27 @@ class RAGPipeline:
         clean_text = re.sub(r'\[\d+(?:\s*,\s*\d+)*\]', '', text).strip()
         if self._is_garbage(clean_text):
             return []
-        top_doc = documents[0]
-        return [{
-            "answer": clean_text,
-            "answer_score": None,
-            "docid": self._format_docid(top_doc),
-            "doc_source": getattr(top_doc, 'source', 'faiss'),
-            "doc_retrieval_score": round(float(getattr(top_doc, 'score', 0.0)), 3),
-            "doc_text": ((top_doc.title.strip() + ". " if top_doc.title and top_doc.title.strip() else "") + (top_doc.abstract or ""))[:self.config.max_abstract_length],
-            "snippet_start": None,
-            "snippet_end": None,
-        }]
+        # Parse cited [N] indices to surface all referenced documents.
+        # If none cited, fall back to top document.
+        cited_indices = sorted(set(
+            int(n) for n in re.findall(r'\[(\d+)\]', text)
+            if int(n) < len(documents)
+        ))
+        if not cited_indices:
+            cited_indices = [0]
+        return [
+            {
+                "answer": clean_text,
+                "answer_score": None,
+                "docid": self._format_docid(documents[idx]),
+                "doc_source": getattr(documents[idx], 'source', 'faiss'),
+                "doc_retrieval_score": round(float(getattr(documents[idx], 'score', 0.0)), 3),
+                "doc_text": ((documents[idx].title.strip() + ". " if documents[idx].title and documents[idx].title.strip() else "") + (documents[idx].abstract or ""))[:self.config.max_abstract_length],
+                "snippet_start": None,
+                "snippet_end": None,
+            }
+            for idx in cited_indices
+        ]
 
     def _build_answer_from_candidate(self, cand: dict, documents: List) -> dict:
         """Build an answer dict from an extractive QA candidate."""
@@ -857,7 +867,7 @@ class RAGPipeline:
             abstract = self._clean_for_llm(doc.abstract or '')[:llm_limit]
             title = self._clean_for_llm(doc.title or '')
             docid = self._format_docid(doc) or str(i)
-            context_parts.append(f"[{i}] {docid}: {title}\n{abstract}")
+            context_parts.append(f"[{i}] {title}\n{abstract}")
 
         context = "\n\n".join(context_parts)
         system = (
