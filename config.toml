@@ -67,7 +67,7 @@ device = -1
 [relevance_filter]
 enabled = true
 min_overlap = 0.15
-final_n = 8
+final_n = 5
 min_extractive_score = 0.30  # BioBERT confidence threshold; below this falls back to generative
 
 [context]

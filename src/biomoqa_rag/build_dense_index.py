@@ -62,6 +62,7 @@ def build_biomedical_corpus():
                         title=doc.title,
                         abstract=doc.abstract,
                         source=doc.source,
+                        pmid=getattr(doc, 'pmid', None),
                     )
 
             # Rate limiting

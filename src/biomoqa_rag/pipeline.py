@@ -614,7 +614,10 @@ class RAGPipeline:
                         {"score": float(round(c["score"], 4)), "text": c["text"][:80]}
                         for c in candidates[:5]
                     ]
-                candidates = [c for c in candidates if c["score"] >= self.config.min_extractive_score]
+                # In hybrid mode, threshold decides generative fallback.
+                # In pure extractive, always return best candidates.
+                if mode == "hybrid":
+                    candidates = [c for c in candidates if c["score"] >= self.config.min_extractive_score]
                 if candidates:
                     mode_used = "extractive" if mode == "extractive" else "hybrid:extractive"
                     answers = [self._build_answer_from_candidate(c, col_docs) for c in candidates[:3]]
@@ -753,7 +756,12 @@ class RAGPipeline:
                     {"score": float(round(c["score"], 4)), "text": c["text"][:80], "source": getattr(documents[c["doc_idx"]], "source", "?")}
                     for c in all_candidates[:10]
                 ]
-            candidates = [c for c in all_candidates if c["score"] >= self.config.min_extractive_score]
+            # In hybrid mode, threshold decides generative fallback.
+            # In pure extractive, always return best candidates.
+            if mode == "hybrid":
+                candidates = [c for c in all_candidates if c["score"] >= self.config.min_extractive_score]
+            else:
+                candidates = all_candidates
             if candidates:
                 mode_used = "extractive" if mode == "extractive" else "hybrid:extractive"
                 for cand in candidates:

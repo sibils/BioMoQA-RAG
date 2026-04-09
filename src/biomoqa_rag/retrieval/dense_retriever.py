@@ -19,6 +19,7 @@ class Document:
     title: str
     abstract: str
     source: str = "unknown"
+    pmid: Optional[str] = None
     embedding: Optional[np.ndarray] = None
 
 
