@@ -611,6 +611,13 @@ class RAGPipeline:
                 ]
             if mode == "hybrid":
                 candidates = [c for c in candidates if c["score"] >= self.config.min_extractive_score]
+            if not candidates and mode == "extractive":
+                # Force-extract best span per doc ignoring impossible-answer gate.
+                # Guarantees documents are always displayed in extractive mode,
+                # even for synthesis questions where BioBERT has low confidence.
+                candidates = self.extractor.extract(
+                    question, col_docs, self.config.max_abstract_length, force=True
+                )
             if candidates:
                 mode_used = "extractive" if mode == "extractive" else "hybrid:extractive"
                 answers = [self._build_answer_from_candidate(c, col_docs) for c in candidates[:3]]

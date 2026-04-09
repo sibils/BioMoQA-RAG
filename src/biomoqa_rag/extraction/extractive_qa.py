@@ -41,12 +41,17 @@ class BioExtractiveQA:
         )
         self.threshold = confidence_threshold
 
-    def extract(self, question: str, documents: List, max_context_length: int = 800) -> List[Dict]:
+    def extract(self, question: str, documents: List, max_context_length: int = 800, force: bool = False) -> List[Dict]:
         """
         Run extractive QA on all documents in a single batched GPU call.
 
         Returns a list of answer candidates sorted by score descending.
         The list is empty when no document yields a confident answer.
+
+        Args:
+            force: When True, bypass SQuAD2 impossible-answer detection and always
+                   return the best span per document. Used in extractive mode to
+                   guarantee at least some output even for synthesis questions.
 
         Each candidate dict has:
           - text (str): verbatim extracted span
@@ -61,7 +66,7 @@ class BioExtractiveQA:
             for doc in documents
         ]
         inputs = [{"question": question, "context": ctx} for ctx in contexts]
-        results = self.qa(inputs, batch_size=len(inputs))
+        results = self.qa(inputs, batch_size=len(inputs), handle_impossible_answer=not force)
 
         # SQuAD2 outputs a HIGH score with an EMPTY string when it decides
         # there is no answer — filter those out before ranking.
