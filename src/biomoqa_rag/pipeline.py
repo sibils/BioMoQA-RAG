@@ -596,31 +596,40 @@ class RAGPipeline:
             reverse=True,
         )
 
-        # ── 4. Per-QA-collection answers — sequential (vLLM lock) ─────────
+        # ── 4a. BioBERT extraction — parallel across all QA collections ────
+        # BioBERT is CPU-bound and independent per collection; run in parallel.
+        # Generation must remain sequential (single GPU lock).
+        def _run_biobert(col_name, col_docs):
+            if mode not in ("extractive", "hybrid"):
+                return col_name, [], {}, mode
+            candidates = self.extractor.extract(question, col_docs, self.config.max_abstract_length)
+            col_debug = {}
+            if debug:
+                col_debug['biobert_scores'] = [
+                    {"score": float(round(c["score"], 4)), "text": c["text"][:80]}
+                    for c in candidates[:5]
+                ]
+            if mode == "hybrid":
+                candidates = [c for c in candidates if c["score"] >= self.config.min_extractive_score]
+            if candidates:
+                mode_used = "extractive" if mode == "extractive" else "hybrid:extractive"
+                answers = [self._build_answer_from_candidate(c, col_docs) for c in candidates[:3]]
+                return col_name, answers, col_debug, mode_used
+            return col_name, [], col_debug, mode
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            biobert_futures = {
+                col: pool.submit(_run_biobert, col, docs)
+                for col, docs in ranked_qa
+            }
+            biobert_results = {col: fut.result() for col, fut in biobert_futures.items()}
+
+        # ── 4b. Generation — sequential (GPU lock) ────────────────────────
         qa_results = []
         final_mode_used = mode
 
         for col_name, col_docs in ranked_qa:
-            answers = []
-            mode_used = mode
-            col_debug = {}
-
-            if mode in ("extractive", "hybrid"):
-                candidates = self.extractor.extract(
-                    question, col_docs, self.config.max_abstract_length
-                )
-                if debug:
-                    col_debug['biobert_scores'] = [
-                        {"score": float(round(c["score"], 4)), "text": c["text"][:80]}
-                        for c in candidates[:5]
-                    ]
-                # In hybrid mode, threshold decides generative fallback.
-                # In pure extractive, always return best candidates.
-                if mode == "hybrid":
-                    candidates = [c for c in candidates if c["score"] >= self.config.min_extractive_score]
-                if candidates:
-                    mode_used = "extractive" if mode == "extractive" else "hybrid:extractive"
-                    answers = [self._build_answer_from_candidate(c, col_docs) for c in candidates[:3]]
+            _, answers, col_debug, mode_used = biobert_results[col_name]
 
             if mode == "generative" or (mode == "hybrid" and not answers):
                 if mode == "hybrid":
