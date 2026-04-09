@@ -222,8 +222,12 @@ class SmartHybridRetriever:
             return self.sibils.retrieve(query, n=top_k, collection=collection)
 
         elif method == 'dense':
-            # Fastest path: Dense only
-            return self.dense.retrieve(query, top_k=top_k)
+            # Fastest path: Dense only — filter by collection if specified
+            results = self.dense.retrieve(query, top_k=top_k)
+            if collection is not None:
+                allowed = set(collection) if isinstance(collection, list) else {collection}
+                results = [d for d in results if getattr(d, 'source', None) in allowed]
+            return results
 
         else:
             # Best quality: Parallel hybrid
