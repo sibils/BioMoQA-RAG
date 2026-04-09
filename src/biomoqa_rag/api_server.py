@@ -11,6 +11,9 @@ Configuration is read from config.toml in the working directory.
 # VLLM_USE_V1 was removed in vLLM >=0.9 — use VLLM_ENABLE_V1_MULTIPROCESSING instead.
 import os
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+# Use local HuggingFace cache — avoids 429 rate-limit errors on startup
+# when vLLM checks the repo file list. Model must be pre-downloaded.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import multiprocessing
 multiprocessing.set_start_method("spawn", force=True)
