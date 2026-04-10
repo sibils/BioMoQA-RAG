@@ -48,7 +48,9 @@ class BioExtractiveQA:
 
     def _run(self, question: str, contexts: List[str], max_seq_len: int = 512, doc_stride: int = 128) -> List[dict]:
         inputs = [{"question": question, "context": ctx} for ctx in contexts]
-        return self.qa(inputs, batch_size=len(inputs), max_seq_len=max_seq_len, doc_stride=doc_stride)
+        result = self.qa(inputs, batch_size=len(inputs), max_seq_len=max_seq_len, doc_stride=doc_stride)
+        # HF pipeline returns a plain dict (not a list) when given a single input — normalise.
+        return [result] if isinstance(result, dict) else result
 
     def extract(self, question: str, documents: List, max_context_length: int = 800) -> List[Dict]:
         """
@@ -81,6 +83,8 @@ class BioExtractiveQA:
         # No sliding window params — 1400 chars fits in one BioBERT window.
         # This makes each doc a single forward pass (~0.3s vs 6s for full sliding).
         fast_results = self.qa(list({"question": question, "context": ctx} for ctx in fast_contexts))
+        if isinstance(fast_results, dict):
+            fast_results = [fast_results]
 
         candidates = {}  # orig_idx -> best candidate
         needs_full = []  # indices (into valid) that need full pass
