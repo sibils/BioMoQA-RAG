@@ -32,6 +32,7 @@ class BioExtractiveQA:
     def __init__(
         self,
         model_name: str = "ktrapeznikov/biobert_v1.1_pubmed_squad_v2",
+        confidence_threshold: float = 0.0,
         device: int = -1,
     ):
         from transformers import pipeline
