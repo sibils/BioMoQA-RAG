@@ -11,8 +11,9 @@ from typing import List, Dict
 # Fast pass: cap context to this many chars (~2 BioBERT windows).
 # Covers most abstracts fully. Only pay the sliding-window cost when
 # the fast pass finds nothing confident.
-_FAST_CONTEXT_LEN = 1400  # ~350 tokens + question fits in one BioBERT window (512 max)
-_FAST_SCORE_MIN = 0.01  # if best score >= this on fast pass, skip full scan
+_FAST_CONTEXT_LEN = 1400   # ~350 tokens + question fits in one BioBERT window (512 max)
+_FULL_CONTEXT_LEN = 3000   # cap for full pass — avoids 25s sliding window on 11k plazi docs
+_FAST_SCORE_MIN = 0.01     # if best score >= this on fast pass, skip full scan
 
 
 class BioExtractiveQA:
@@ -100,7 +101,9 @@ class BioExtractiveQA:
 
         # ── Pass 2: full sliding window for docs with no confident answer ─
         if needs_full:
-            full_inputs = [contexts[vi] for vi in needs_full]
+            # Cap at 3000 chars — avoids 25s sliding window on 11k-char plazi docs.
+            # 3000 chars ≈ 750 tokens, fits in ~2 windows: good coverage, ~2s/doc.
+            full_inputs = [contexts[vi][:_FULL_CONTEXT_LEN] for vi in needs_full]
             full_results = self._run(question, full_inputs)
             for vi, result in zip(needs_full, full_results):
                 orig_idx = orig_indices[vi]
