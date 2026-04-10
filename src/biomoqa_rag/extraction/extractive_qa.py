@@ -45,7 +45,11 @@ class BioExtractiveQA:
 
     def extract(self, question: str, documents: List, max_context_length: int = 800) -> List[Dict]:
         """
-        Run extractive QA on all documents in a single batched GPU call.
+        Run extractive QA on all documents using the HF pipeline's sliding window.
+
+        max_context_length is ignored — we pass the full text and let the pipeline
+        handle long contexts via max_seq_len=512 + doc_stride=128 sliding window.
+        This is critical for plazi documents which can be 5k-10k chars.
 
         Always returns at least one candidate per document with non-empty text.
         Returns candidates sorted by score descending.
@@ -56,17 +60,17 @@ class BioExtractiveQA:
           - doc_idx (int): index in the documents list
           - span_start (int): char offset within passage
           - span_end (int): char offset within passage
-          - passage (str): context fed to BioBERT (title + abstract, truncated)
+          - passage (str): full context fed to BioBERT
         """
         contexts = [
-            ((doc.title.strip() + ". " if doc.title and doc.title.strip() else "") + (doc.abstract or ""))[:max_context_length]
+            ((doc.title.strip() + ". " if doc.title and doc.title.strip() else "") + (doc.abstract or ""))
             for doc in documents
         ]
         inputs = [{"question": question, "context": ctx} for ctx in contexts if ctx.strip()]
         if not inputs:
             return []
 
-        results = self.qa(inputs, batch_size=len(inputs))
+        results = self.qa(inputs, batch_size=len(inputs), max_seq_len=512, doc_stride=128)
 
         candidates = []
         for idx, (result, context) in enumerate(zip(results, contexts)):
