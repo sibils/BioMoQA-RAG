@@ -446,8 +446,8 @@ class RAGPipeline:
         # Show a window of ±300 chars around the answer span instead of the full passage.
         passage = cand["passage"]
         s, e = cand["span_start"], cand["span_end"]
-        window_start = max(0, s - 300)
-        window_end = min(len(passage), e + 300)
+        window_start = max(0, s - 500)
+        window_end = min(len(passage), e + 500)
         snippet = passage[window_start:window_end].strip()
         return {
             "answer": cand["text"],
