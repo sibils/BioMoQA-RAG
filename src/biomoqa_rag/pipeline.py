@@ -443,15 +443,21 @@ class RAGPipeline:
     def _build_answer_from_candidate(self, cand: dict, documents: List) -> dict:
         """Build an answer dict from an extractive QA candidate."""
         doc = documents[cand["doc_idx"]]
+        # Show a window of ±300 chars around the answer span instead of the full passage.
+        passage = cand["passage"]
+        s, e = cand["span_start"], cand["span_end"]
+        window_start = max(0, s - 300)
+        window_end = min(len(passage), e + 300)
+        snippet = passage[window_start:window_end].strip()
         return {
             "answer": cand["text"],
             "answer_score": round(cand["score"], 4),
             "docid": self._format_docid(doc),
             "doc_source": getattr(doc, 'source', 'faiss'),
             "doc_retrieval_score": round(float(getattr(doc, 'score', 0.0)), 3),
-            "doc_text": cand["passage"],
-            "snippet_start": cand["span_start"],
-            "snippet_end": cand["span_end"],
+            "doc_text": snippet,
+            "snippet_start": s - window_start,
+            "snippet_end": e - window_start,
         }
 
     @property
