@@ -356,6 +356,10 @@ class RAGPipeline:
 
         documents = [d for d in documents if _is_prose(d)]
 
+        # Always cap to final_n — ensures BioBERT doesn't run on 30 docs when
+        # reranker and relevance filter are both disabled.
+        documents = documents[:final_n]
+
         # Cap per-collection contribution ONLY when mixing multiple collections.
         # When the caller already restricts to a specific collection, all retrieved
         # docs are from that collection and the cap would incorrectly halve them.
