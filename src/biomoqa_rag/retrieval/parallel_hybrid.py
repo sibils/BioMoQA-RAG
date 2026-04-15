@@ -4,7 +4,7 @@ Runs BM25 and Dense retrieval in parallel threads.
 """
 
 from typing import List, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 import time
 
 
@@ -22,7 +22,7 @@ class ParallelHybridRetriever:
         dense_retriever,
         alpha: float = 0.5,
         k: int = 60,
-        timeout: float = 10.0
+        timeout: float = 20.0
     ):
         """
         Args:
@@ -113,7 +113,7 @@ class ParallelHybridRetriever:
                             dense_results = future.result()
                     except Exception as e:
                         errors.append(str(e))
-            except TimeoutError:
+            except (TimeoutError, FuturesTimeoutError):
                 # One retriever timed out — use whatever finished
                 if future_bm25.done():
                     try:

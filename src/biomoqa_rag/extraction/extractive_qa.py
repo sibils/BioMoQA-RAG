@@ -1,30 +1,23 @@
 """
 Extractive QA module using BioBERT fine-tuned on SQuAD2.
 
-Extracts verbatim answer spans from retrieved documents — no generation,
-no hallucination. Always returns the best span per document; quality
-filtering is done upstream (min_extractive_score threshold in hybrid mode).
+Single-pass strategy matching the original sibils.org QA behaviour:
+one forward pass per document on the first 512 tokens, no sliding window.
+Quality filtering is done upstream (min_extractive_score threshold in hybrid mode).
 """
 
 from typing import List, Dict
 
-# Fast pass: cap context to this many chars (~2 BioBERT windows).
-# Covers most abstracts fully. Only pay the sliding-window cost when
-# the fast pass finds nothing confident.
-_FAST_CONTEXT_LEN = 1400   # ~350 tokens + question fits in one BioBERT window (512 max)
-_FULL_CONTEXT_LEN = 3000   # cap for full pass — avoids 25s sliding window on 11k plazi docs
-_FAST_SCORE_MIN = 0.01     # if best score >= this on fast pass, skip full scan
+# Context window: ~2000 chars ≈ 500 tokens, safely within one BioBERT window (512 max).
+_CONTEXT_LEN = 2000
 
 
 class BioExtractiveQA:
     """
     Extractive QA using a BERT-style model trained on SQuAD2.
 
-    Two-pass strategy for speed:
-    1. Fast pass: truncate context to 2000 chars (~1-2 BioBERT windows).
-       If any candidate scores >= 0.01, return those results.
-    2. Full pass: if fast pass finds nothing, run sliding window over
-       the full document text (handles long plazi/pmc full-text docs).
+    Single-pass strategy: one BioBERT forward pass per document on the
+    first 2000 chars (~500 tokens). Matches original sibils.org QA behaviour.
 
     handle_impossible_answer=False ensures a span is always returned.
     Quality gating is done upstream via min_extractive_score in hybrid mode.
@@ -46,16 +39,9 @@ class BioExtractiveQA:
             model_kwargs={"low_cpu_mem_usage": False},
         )
 
-    def _run(self, question: str, contexts: List[str], max_seq_len: int = 512, doc_stride: int = 128) -> List[dict]:
-        inputs = [{"question": question, "context": ctx} for ctx in contexts]
-        result = self.qa(inputs, batch_size=len(inputs), max_seq_len=max_seq_len, doc_stride=doc_stride)
-        # HF pipeline returns a plain dict (not a list) when given a single input — normalise.
-        return [result] if isinstance(result, dict) else result
-
     def extract(self, question: str, documents: List, max_context_length: int = 800) -> List[Dict]:
         """
-        Run extractive QA with two-pass strategy: fast truncated pass first,
-        full sliding-window pass only for docs that returned no confident answer.
+        Run single-pass extractive QA over documents.
 
         Returns candidates sorted by score descending. Always returns at least
         one candidate per document when documents have non-empty text.
@@ -71,56 +57,28 @@ class BioExtractiveQA:
             ((doc.title.strip() + ". " if doc.title and doc.title.strip() else "") + (doc.abstract or ""))
             for doc in documents
         ]
-        # Filter empty docs but track original indices
-        valid = [(i, ctx) for i, ctx in enumerate(full_contexts) if ctx.strip()]
+        valid = [(i, ctx[:_CONTEXT_LEN]) for i, ctx in enumerate(full_contexts) if ctx.strip()]
         if not valid:
             return []
 
         orig_indices, contexts = zip(*valid)
 
-        # ── Pass 1: fast truncated contexts ──────────────────────────────
-        fast_contexts = [ctx[:_FAST_CONTEXT_LEN] for ctx in contexts]
-        # No sliding window params — 1400 chars fits in one BioBERT window.
-        # This makes each doc a single forward pass (~0.3s vs 6s for full sliding).
-        fast_results = self.qa(list({"question": question, "context": ctx} for ctx in fast_contexts))
-        if isinstance(fast_results, dict):
-            fast_results = [fast_results]
+        inputs = [{"question": question, "context": ctx} for ctx in contexts]
+        results = self.qa(inputs, batch_size=len(inputs))
+        # HF pipeline returns a plain dict (not a list) when given a single input — normalise.
+        if isinstance(results, dict):
+            results = [results]
 
-        candidates = {}  # orig_idx -> best candidate
-        needs_full = []  # indices (into valid) that need full pass
-
-        for vi, (result, fast_ctx) in enumerate(zip(fast_results, fast_contexts)):
-            orig_idx = orig_indices[vi]
-            if result["answer"].strip() and result["score"] >= _FAST_SCORE_MIN:
-                candidates[orig_idx] = {
+        candidates = []
+        for orig_idx, ctx, result in zip(orig_indices, contexts, results):
+            if result["answer"].strip():
+                candidates.append({
                     "text": result["answer"],
                     "score": result["score"],
                     "doc_idx": orig_idx,
                     "span_start": result["start"],
                     "span_end": result["end"],
-                    "passage": fast_ctx,
-                }
-            else:
-                needs_full.append(vi)
+                    "passage": ctx,
+                })
 
-        # ── Pass 2: full sliding window for docs with no confident answer ─
-        if needs_full:
-            # Cap at 3000 chars — avoids 25s sliding window on 11k-char plazi docs.
-            # 3000 chars ≈ 750 tokens, fits in ~2 windows: good coverage, ~2s/doc.
-            full_inputs = [contexts[vi][:_FULL_CONTEXT_LEN] for vi in needs_full]
-            full_results = self._run(question, full_inputs)
-            for vi, result in zip(needs_full, full_results):
-                orig_idx = orig_indices[vi]
-                full_ctx = contexts[vi]
-                if result["answer"].strip():
-                    candidates[orig_idx] = {
-                        "text": result["answer"],
-                        "score": result["score"],
-                        "doc_idx": orig_idx,
-                        "span_start": result["start"],
-                        "span_end": result["end"],
-                        "passage": full_ctx,
-                    }
-
-        result_list = sorted(candidates.values(), key=lambda x: x["score"], reverse=True)
-        return result_list
+        return sorted(candidates, key=lambda x: x["score"], reverse=True)

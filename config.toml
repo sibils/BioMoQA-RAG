@@ -34,7 +34,7 @@ retrieval_n = 30
 use_smart_retrieval = true
 
 # Hybrid retrieval weight (0 = SIBILS only, 1 = FAISS only)
-hybrid_alpha = 0.5
+hybrid_alpha = 0.0  # BM25 only — matches old sibils.org QA behaviour
 
 [sibils]
 # SIBILS search API endpoint
@@ -54,7 +54,7 @@ cache_dir = "data/sibils_cache"
 cache_ttl = 604800  # 7 days in seconds
 
 [reranking]
-enabled = true
+enabled = false  # disabled — matches old sibils.org QA behaviour
 model = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 top_k = 7
 
@@ -65,7 +65,7 @@ top_k = 7
 device = -1
 
 [relevance_filter]
-enabled = true
+enabled = false  # disabled — matches old sibils.org QA behaviour
 min_overlap = 0.15
 final_n = 5
 min_extractive_score = 0.20  # BioBERT confidence threshold; below this falls back to generative
