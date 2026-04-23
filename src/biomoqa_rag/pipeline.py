@@ -148,13 +148,21 @@ class RAGPipeline:
             cache_ttl=self.config.sibils_cache_ttl,
         )
 
-        self.dense = DenseRetriever(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
-        )
-        self.dense.load("data/faiss_index.bin", "data/documents.pkl")
+        # Only load FAISS when it contributes to retrieval (alpha > 0)
+        if self.config.hybrid_alpha > 0:
+            self.dense = DenseRetriever(
+                model_name="sentence-transformers/all-MiniLM-L6-v2"
+            )
+            self.dense.load("data/faiss_index.bin", "data/documents.pkl")
+        else:
+            self.dense = None
+            print("✓ FAISS disabled (hybrid_alpha=0, BM25 only)")
 
-        # Smart hybrid retriever
-        if self.config.use_smart_retrieval:
+        # Smart hybrid retriever — falls back to SIBILS-only when dense is None
+        if self.dense is None:
+            self.retriever = self.sibils
+            print("✓ Using SIBILS BM25 retriever (no FAISS)")
+        elif self.config.use_smart_retrieval:
             self.retriever = SmartHybridRetriever(
                 self.sibils,
                 self.dense,
@@ -325,9 +333,11 @@ class RAGPipeline:
         Thread-safe (no GPU, only SIBILS HTTP + FAISS + CPU CrossEncoder).
         Returns (documents, num_retrieved).
         """
-        documents = self.retriever.retrieve(
-            question, n=retrieval_n, top_k=retrieval_n, collection=collection,
-        )
+        # SIBILSRetriever doesn't accept top_k; hybrid retrievers do.
+        retrieve_kwargs = {"n": retrieval_n, "collection": collection}
+        if self.dense is not None:
+            retrieve_kwargs["top_k"] = retrieval_n
+        documents = self.retriever.retrieve(question, **retrieve_kwargs)
         num_retrieved = len(documents)
 
         if self.reranker and len(documents) > final_n:
