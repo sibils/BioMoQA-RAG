@@ -148,51 +148,26 @@ class RAGPipeline:
             cache_ttl=self.config.sibils_cache_ttl,
         )
 
-        # Only load FAISS when it contributes to retrieval (alpha > 0)
-        if self.config.hybrid_alpha > 0:
-            self.dense = DenseRetriever(
-                model_name="sentence-transformers/all-MiniLM-L6-v2"
-            )
-            self.dense.load("data/faiss_index.bin", "data/documents.pkl")
-        else:
-            self.dense = None
-            print("✓ FAISS disabled (hybrid_alpha=0, BM25 only)")
+        # ── SIBILS-only retriever (for extractive mode) ──────────────────
+        self.sibils_retriever = self.sibils
+        print("✓ Using SIBILS BM25 retriever (extractive)")
 
-        # Smart hybrid retriever — falls back to SIBILS-only when dense is None
-        if self.dense is None:
-            self.retriever = self.sibils
-            print("✓ Using SIBILS BM25 retriever (no FAISS)")
-        elif self.config.use_smart_retrieval:
-            self.retriever = SmartHybridRetriever(
-                self.sibils,
-                self.dense,
-                alpha=self.config.hybrid_alpha,
-                k=60
-            )
-            print("✓ Using SmartHybridRetriever")
-        else:
-            self.retriever = ParallelHybridRetriever(
-                self.sibils,
-                self.dense,
-                alpha=self.config.hybrid_alpha,
-                k=60,
-                timeout=self.config.timeout
-            )
-            print("✓ Using ParallelHybridRetriever")
+        # ── RAG retriever (for generative mode): FAISS + BM25 + reranker ─
+        self.dense = DenseRetriever(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        self.dense.load("data/faiss_index.bin", "data/documents.pkl")
+        self.rag_retriever = SmartHybridRetriever(
+            self.sibils, self.dense, alpha=0.5, k=60
+        )
+        print("✓ Using SmartHybridRetriever (RAG/generative)")
 
-        # Reranker
-        self.reranker = None
-        if self.config.use_reranking:
-            self.reranker = SemanticReranker(
-                model_name=self.config.reranker_model
-            )
-            print(f"✓ Loaded reranker")
+        # Keep self.retriever pointing to SIBILS for backwards-compat
+        self.retriever = self.sibils_retriever
 
-        # Relevance filter
-        self.relevance_filter = None
-        if self.config.use_relevance_filter:
-            self.relevance_filter = FastRelevanceFilter(min_overlap=0.15)
-            print("✓ Loaded relevance filter")
+        # Reranker and relevance filter — always instantiated (used in RAG retrieval path)
+        self.reranker = SemanticReranker(model_name=self.config.reranker_model)
+        print("✓ Loaded reranker")
+        self.relevance_filter = FastRelevanceFilter(min_overlap=0.15)
+        print("✓ Loaded relevance filter")
 
         # Load LLM (vLLM for GPU or transformers for CPU)
         self.llm = None
@@ -299,8 +274,7 @@ class RAGPipeline:
                 return str(pmcid) if str(pmcid).startswith("PMC") else f"PMC{pmcid}"
             return doc_id  # fallback to _id (e.g. DOI)
 
-        if source in ('plazi', 'suppdata'):
-            # doc_id = elasticsearch _id, which is the canonical ID for both
+        if source == 'plazi':
             return doc_id
 
         # medline / faiss: prefer pmid
@@ -327,28 +301,32 @@ class RAGPipeline:
         retrieval_n: int,
         final_n: int,
         collection: Optional[str],
+        retrieval: str = "sibils",
     ):
         """Steps 1-4: retrieval → reranking → filtering → score normalization.
 
         Thread-safe (no GPU, only SIBILS HTTP + FAISS + CPU CrossEncoder).
         Returns (documents, num_retrieved).
         """
-        # SIBILSRetriever doesn't accept top_k; hybrid retrievers do.
-        retrieve_kwargs = {"n": retrieval_n, "collection": collection}
-        if self.dense is not None:
-            retrieve_kwargs["top_k"] = retrieval_n
-        documents = self.retriever.retrieve(question, **retrieve_kwargs)
+        if retrieval == "rag":
+            documents = self.rag_retriever.retrieve(
+                question, n=retrieval_n, top_k=retrieval_n, collection=collection
+            )
+        else:
+            documents = self.sibils_retriever.retrieve(
+                question, n=retrieval_n, collection=collection
+            )
         num_retrieved = len(documents)
 
-        if self.reranker and len(documents) > final_n:
-            documents = self.reranker.rerank(
-                question, documents, top_k=min(self.config.rerank_n, len(documents))
-            )
-
-        if self.relevance_filter and len(documents) > final_n:
-            documents = self.relevance_filter.filter_relevant(
-                question, documents, max_docs=final_n
-            )
+        if retrieval == "rag":
+            if len(documents) > final_n:
+                documents = self.reranker.rerank(
+                    question, documents, top_k=min(self.config.rerank_n, len(documents))
+                )
+            if len(documents) > final_n:
+                documents = self.relevance_filter.filter_relevant(
+                    question, documents, max_docs=final_n
+                )
 
         # Drop documents with no meaningful content (e.g. empty Plazi treatments)
         # Also drop suppdata/pmc docs whose "abstract" is actually CSV/tabular data
@@ -438,21 +416,30 @@ class RAGPipeline:
         ))
         if not cited_indices:
             cited_indices = [0]
-        # First item carries the answer text; subsequent items are doc-only (answer="")
-        # so the frontend renders the answer once and all cited docs below it.
-        return [
-            {
-                "answer": clean_text if i == 0 else "",
-                "answer_score": None,
-                "docid": self._format_docid(documents[idx]),
-                "doc_source": getattr(documents[idx], 'source', 'faiss'),
-                "doc_retrieval_score": round(float(getattr(documents[idx], 'score', 0.0)), 3),
-                "doc_text": ((documents[idx].title.strip() + ". " if documents[idx].title and documents[idx].title.strip() else "") + (documents[idx].abstract or ""))[:self.config.max_abstract_length],
-                "snippet_start": None,
-                "snippet_end": None,
-            }
-            for i, idx in enumerate(cited_indices)
-        ]
+        # Return one item: the full answer text with all cited docs as lists.
+        return [{
+            "answer": clean_text,
+            "answer_score": None,
+            "docid": None,
+            "doc_source": None,
+            "doc_retrieval_score": None,
+            "doc_text": None,
+            "snippet_start": None,
+            "snippet_end": None,
+            "docids": [self._format_docid(documents[i]) for i in cited_indices],
+            "docs": [
+                {
+                    "docid": self._format_docid(documents[i]),
+                    "doc_source": getattr(documents[i], 'source', ''),
+                    "doc_retrieval_score": round(float(getattr(documents[i], 'score', 0.0)), 3),
+                    "doc_text": (
+                        (documents[i].title.strip() + ". " if documents[i].title and documents[i].title.strip() else "")
+                        + (documents[i].abstract or "")
+                    )[:800],
+                }
+                for i in cited_indices
+            ],
+        }]
 
     def _build_answer_from_candidate(self, cand: dict, documents: List) -> dict:
         """Build an answer dict from an extractive QA candidate."""
@@ -564,19 +551,14 @@ class RAGPipeline:
         question: str,
         retrieval_n: Optional[int] = None,
         final_n: Optional[int] = None,
-        mode: str = "hybrid",
+        mode: str = "generative",
+        retrieval: str = "sibils",
         debug: bool = False,
     ) -> Dict:
         """
-        Retrieve independently per collection, then generate answers sequentially.
+        Retrieve independently per collection (medline, plazi, pmc), then generate answers.
 
-        Each collection gets its own retrieval pass with final_n document slots so
-        no single collection can crowd out others.
-
-        suppdata uses Option B: docs returned directly as answers without QA.
-        suppdata retrieval runs in parallel with QA-collection retrieval, and its
-        result is built immediately (no LLM wait) so it never blocks QA latency.
-
+        Each collection gets its own retrieval pass with final_n document slots.
         Returns a dict with `collection_results` ordered best-first.
         """
         from concurrent.futures import ThreadPoolExecutor
@@ -585,42 +567,29 @@ class RAGPipeline:
         final_n = final_n or self.config.final_n
 
         qa_collections = ["medline", "plazi", "pmc"]
-        suppdata_final_n = 3  # suppdata: top 3 docs only (no QA needed)
 
         # ── 1. All retrievals in parallel (IO-bound: safe to thread) ─────
-        # suppdata gets a smaller slot count since we just surface the docs.
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        with ThreadPoolExecutor(max_workers=3) as pool:
             qa_futures = {
-                col: pool.submit(self._retrieve_and_prepare, question, retrieval_n, final_n, col)
+                col: pool.submit(self._retrieve_and_prepare, question, retrieval_n, final_n, col, retrieval)
                 for col in qa_collections
             }
-            supp_future = pool.submit(
-                self._retrieve_and_prepare, question, retrieval_n, suppdata_final_n, 'suppdata'
-            )
             qa_docs = {col: fut.result() for col, fut in qa_futures.items()}
-            supp_docs, supp_n = supp_future.result()
 
-        total_retrieved = sum(n for _, n in qa_docs.values()) + supp_n
+        total_retrieved = sum(n for _, n in qa_docs.values())
 
-        # ── 2. suppdata result — instant, no LLM ─────────────────────────
-        suppdata_result = {
-            "collection": "suppdata",
-            "answers": self._suppdata_doc_answers(supp_docs),
-            "mode_used": "document",
-        }
-
-        # ── 3. Rank QA collections by their best-scoring document ─────────
+        # ── 2. Rank QA collections by their best-scoring document ─────────
         ranked_qa = sorted(
             [(col, docs) for col, (docs, _) in qa_docs.items() if docs],
             key=lambda kv: float(getattr(kv[1][0], 'score', 0.0)) if kv[1] else 0.0,
             reverse=True,
         )
 
-        # ── 4a. BioBERT extraction — parallel across all QA collections ────
+        # ── 3a. BioBERT extraction — parallel across all collections ───────
         # BioBERT is CPU-bound and independent per collection; run in parallel.
         # Generation must remain sequential (single GPU lock).
         def _run_biobert(col_name, col_docs):
-            if mode not in ("extractive", "hybrid"):
+            if mode != "extractive":
                 return col_name, [], {}, mode
             candidates = self.extractor.extract(question, col_docs, self.config.max_abstract_length)
             col_debug = {}
@@ -629,12 +598,9 @@ class RAGPipeline:
                     {"score": float(round(c["score"], 4)), "text": c["text"][:80]}
                     for c in candidates[:5]
                 ]
-            if mode == "hybrid":
-                candidates = [c for c in candidates if c["score"] >= self.config.min_extractive_score]
             if candidates:
-                mode_used = "extractive" if mode == "extractive" else "hybrid:extractive"
                 answers = [self._build_answer_from_candidate(c, col_docs) for c in candidates[:3]]
-                return col_name, answers, col_debug, mode_used
+                return col_name, answers, col_debug, "extractive"
             return col_name, [], col_debug, mode
 
         with ThreadPoolExecutor(max_workers=3) as pool:
@@ -644,16 +610,14 @@ class RAGPipeline:
             }
             biobert_results = {col: fut.result() for col, fut in biobert_futures.items()}
 
-        # ── 4b. Generation — sequential (GPU lock) ────────────────────────
+        # ── 3b. Generation — sequential (GPU lock) ────────────────────────
         qa_results = []
         final_mode_used = mode
 
         for col_name, col_docs in ranked_qa:
             _, answers, col_debug, mode_used = biobert_results[col_name]
 
-            if mode == "generative" or (mode == "hybrid" and not answers):
-                if mode == "hybrid":
-                    mode_used = "hybrid:generative"
+            if mode == "generative":
                 raw_text = (
                     self._generate_vllm(self._build_messages(question, col_docs))
                     if self.config.use_vllm
@@ -662,8 +626,9 @@ class RAGPipeline:
                 if debug:
                     col_debug['raw_generated_text'] = raw_text
                 answers = self._answers_from_generation(question, raw_text, col_docs, mode_used)
+                mode_used = "generative"
 
-            if not qa_results:  # first QA collection = best ranked
+            if not qa_results:
                 final_mode_used = mode_used
 
             entry = {"collection": col_name, "answers": answers, "mode_used": mode_used}
@@ -671,28 +636,12 @@ class RAGPipeline:
                 entry['debug_info'] = col_debug
             qa_results.append(entry)
 
-        # ── 5. Merge: rank all 4 collections, suppdata by best-doc score ──
-        # suppdata rank = based on its best doc score vs QA collections
-        supp_score = float(getattr(supp_docs[0], 'score', 0.0)) if supp_docs else 0.0
-        all_results = []
-        supp_inserted = False
-        for entry in qa_results:
-            col_name = entry['collection']
-            col_docs_list = qa_docs[col_name][0]
-            col_score = float(getattr(col_docs_list[0], 'score', 0.0)) if col_docs_list else 0.0
-            if not supp_inserted and supp_score >= col_score:
-                all_results.append(suppdata_result)
-                supp_inserted = True
-            all_results.append(entry)
-        if not supp_inserted:
-            all_results.append(suppdata_result)
-
-        # Add rank numbers
+        # ── 4. Add rank numbers ───────────────────────────────────────────
         collection_results = [
-            {**entry, "rank": i + 1} for i, entry in enumerate(all_results)
+            {**entry, "rank": i + 1} for i, entry in enumerate(qa_results)
         ]
 
-        result = {
+        return {
             "question": question,
             "collection_results": collection_results,
             "mode_used": final_mode_used,
@@ -700,7 +649,6 @@ class RAGPipeline:
             "model": self._model_label(final_mode_used, self.config.model_name),
             "pipeline_time": round(time.time() - start_time, 3),
         }
-        return result
 
     def run(
         self,
@@ -710,7 +658,8 @@ class RAGPipeline:
         collection: Optional[str] = None,
         return_documents: bool = False,
         debug: bool = False,
-        mode: str = "hybrid",
+        mode: str = "generative",
+        retrieval: str = "sibils",
     ) -> Dict:
         """
         Run the RAG pipeline.
@@ -723,10 +672,8 @@ class RAGPipeline:
                         If None, uses default (medline + plazi).
             return_documents: Include documents in response
             debug: Include debug information
-            mode: Answer strategy:
-                  - "hybrid" (default): extractive first, generative fallback
-                  - "extractive": verbatim span from BioBERT, no hallucination possible
-                  - "generative": LLM synthesises a multi-sentence answer
+            mode: Answer strategy — "extractive" (BioBERT span) or "generative" (LLM)
+            retrieval: Retrieval strategy — "sibils" (BM25 only) or "rag" (FAISS + BM25 + reranker)
 
         Returns:
             Response dict with answer and metadata
@@ -740,14 +687,13 @@ class RAGPipeline:
         # Steps 1-4: retrieval → reranking → filtering → score normalization
         t0 = time.time()
         documents, num_retrieved = self._retrieve_and_prepare(
-            question, retrieval_n, final_n, collection
+            question, retrieval_n, final_n, collection, retrieval
         )
         if debug:
             debug_info['retrieval_time'] = round(time.time() - t0, 3)
             debug_info['initial_count'] = num_retrieved
             debug_info['final_count'] = len(documents)
 
-        # Step 4: Handle case where no relevant documents found
         if not documents:
             return {
                 'sibils_version': PIPELINE_VERSION,
@@ -769,36 +715,19 @@ class RAGPipeline:
         mode_used = mode
         answers = []
 
-        # Option B: suppdata — return documents directly without QA.
-        # suppdata files are OCR'd PDFs/spreadsheets with no prose abstracts;
-        # BioBERT returns "impossible answer" and the LLM generates garbage.
-        if collection == 'suppdata':
-            answers = self._suppdata_doc_answers(documents)
-            mode_used = "document"
-
-        elif mode in ("extractive", "hybrid"):
-            all_candidates = self.extractor.extract(
+        if mode == "extractive":
+            candidates = self.extractor.extract(
                 question, documents, self.config.max_abstract_length
             )
             if debug:
                 debug_info['biobert_scores'] = [
                     {"score": float(round(c["score"], 4)), "text": c["text"][:80], "source": getattr(documents[c["doc_idx"]], "source", "?")}
-                    for c in all_candidates[:10]
+                    for c in candidates[:10]
                 ]
-            # In hybrid mode, threshold decides generative fallback.
-            # In pure extractive, always return best candidates.
-            if mode == "hybrid":
-                candidates = [c for c in all_candidates if c["score"] >= self.config.min_extractive_score]
-            else:
-                candidates = all_candidates
-            if candidates:
-                mode_used = "extractive" if mode == "extractive" else "hybrid:extractive"
-                for cand in candidates:
-                    answers.append(self._build_answer_from_candidate(cand, documents))
+            for cand in candidates:
+                answers.append(self._build_answer_from_candidate(cand, documents))
 
-        if collection != 'suppdata' and (mode == "generative" or (mode == "hybrid" and not answers)):
-            if mode == "hybrid":
-                mode_used = "hybrid:generative"
+        if mode == "generative":
             raw_text = self._generate_vllm(self._build_messages(question, documents)) \
                 if self.config.use_vllm \
                 else self._generate_cpu(self._build_messages(question, documents))
@@ -856,37 +785,6 @@ class RAGPipeline:
         cleaned = re.sub(r'[^\x00-\x7F]+', ' ', text)
         cleaned = re.sub(r'[ \t]+', ' ', cleaned).strip()
         return cleaned
-
-    def _suppdata_doc_answers(self, documents: List) -> List[dict]:
-        """Option B for suppdata: return retrieved docs directly without running QA.
-
-        suppdata documents are supplementary files (PDFs, spreadsheets) whose
-        "abstract" is OCR'd text — BioBERT returns empty spans and the LLM
-        produces garbage.  The document title + abstract are returned as-is so
-        the frontend can display the full document context.
-        """
-        answers = []
-        for doc in documents[:3]:
-            title = (doc.title or '').strip()
-            if not title:
-                continue
-            abstract = (doc.abstract or '').strip()
-            # answer = title for the primary display field; doc_text has the full content
-            # Include a brief abstract preview in the answer so the frontend has something
-            # meaningful to show even if it only renders the answer field.
-            answer_text = title
-            doc_text = (title + '. ' + abstract)[:self.config.max_abstract_length]
-            answers.append({
-                "answer": answer_text,
-                "answer_score": None,
-                "docid": self._format_docid(doc),
-                "doc_source": "suppdata",
-                "doc_retrieval_score": round(float(getattr(doc, 'score', 0.0)), 3),
-                "doc_text": doc_text,
-                "snippet_start": None,
-                "snippet_end": None,
-            })
-        return answers
 
     def _build_messages(self, question: str, documents: List) -> List[dict]:
         """Build chat messages for the LLM from question and retrieved documents.

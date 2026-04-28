@@ -74,8 +74,8 @@ _multi_cache_mutex = threading.Lock()
 _MULTI_CACHE_TTL = 120            # seconds
 
 
-def _get_or_run_multi(pipeline, question, mode, retrieval_n, final_n, debug):
-    key = (question, mode)
+def _get_or_run_multi(pipeline, question, mode, retrieval, retrieval_n, final_n, debug):
+    key = (question, mode, retrieval)
     with _multi_cache_mutex:
         if key in _multi_cache:
             result, ts = _multi_cache[key]
@@ -92,7 +92,7 @@ def _get_or_run_multi(pipeline, question, mode, retrieval_n, final_n, debug):
         try:
             result = pipeline.run_multi_collection(
                 question=question, retrieval_n=retrieval_n,
-                final_n=final_n, mode=mode, debug=debug,
+                final_n=final_n, mode=mode, retrieval=retrieval, debug=debug,
             )
             with _multi_cache_mutex:
                 _multi_cache[key] = (result, _time.time())
@@ -195,29 +195,34 @@ class QuestionRequest(BaseModel):
     final_n: Optional[int] = None
     include_documents: bool = False
     debug: bool = False
-    mode: str = "hybrid"  # "hybrid" | "extractive" | "generative"
+    mode: str = "generative"        # "extractive" | "generative"
+    retrieval: str = "sibils"       # "sibils" (BM25 only) | "rag" (FAISS + reranker)
 
     model_config = {"json_schema_extra": {"example": {
         "question": "What causes malaria?",
-        "mode": "hybrid",
+        "mode": "generative",
+        "retrieval": "rag",
     }}}
 
 
 class AnswerItem(BaseModel):
     """One ranked answer candidate — mirrors the old sibils.org answer object."""
     answer: str
-    answer_score: Optional[float]       # BioBERT span score; None for generative
-    docid: Optional[str]                # PMID, Plazi treatment ID, or PMC ID
-    doc_source: Optional[str]           # Collection: "medline", "plazi", "pmc", "faiss"
-    doc_retrieval_score: Optional[float]
-    doc_text: Optional[str]             # Context passage (title + abstract, truncated)
-    snippet_start: Optional[int]        # Char offset of answer span in doc_text
-    snippet_end: Optional[int]          # Char offset of answer span in doc_text
+    answer_score: Optional[float] = None    # BioBERT span score; None for generative
+    docid: Optional[str] = None             # PMID, Plazi treatment ID, or PMC ID (extractive)
+    doc_source: Optional[str] = None        # Collection: "medline", "plazi", "pmc"
+    doc_retrieval_score: Optional[float] = None
+    doc_text: Optional[str] = None          # Context passage (extractive only)
+    snippet_start: Optional[int] = None     # Char offset of answer span in doc_text
+    snippet_end: Optional[int] = None       # Char offset of answer span in doc_text
+    # Generative-only: list of all cited documents
+    docids: Optional[List[str]] = None      # All cited doc IDs
+    docs: Optional[List[Dict]] = None       # All cited docs with docid/doc_text/doc_source
 
 
 class CollectionResult(BaseModel):
     """Per-collection answer block, ordered by relevance rank."""
-    collection: str                      # "medline", "plazi", "pmc", "suppdata"
+    collection: str                      # "medline", "plazi", "pmc"
     rank: int                            # 1 = best collection for this question
     answers: List[AnswerItem]
     mode_used: Optional[str] = None
@@ -289,11 +294,19 @@ def health_check():
     }
 
 
+def _resolve_mode(mode: str, retrieval: str) -> tuple[str, str]:
+    """Map legacy 'hybrid' mode and return (mode, retrieval)."""
+    if mode == "hybrid":
+        # Legacy: hybrid = generative with RAG retrieval
+        return "generative", "rag"
+    return mode, retrieval
+
+
 def _run_qa(
     question: str,
     col: Optional[str],
     n: Optional[int],
-    mode: str = "hybrid",
+    mode: str = "generative",
     include_documents: bool = False,
     debug: bool = False,
     retrieval_n: Optional[int] = None,
@@ -341,10 +354,12 @@ def answer_question_post(request: QuestionRequest):
     """
     try:
         p = get_pipeline()
+        mode, retrieval = _resolve_mode(request.mode, request.retrieval)
         result = _get_or_run_multi(
             p,
             question=request.question,
-            mode=request.mode,
+            mode=mode,
+            retrieval=retrieval,
             retrieval_n=request.retrieval_n,
             final_n=request.final_n,
             debug=request.debug,
@@ -365,9 +380,9 @@ def answer_question_post(request: QuestionRequest):
 @app.get("/api/QA", response_model=QAResponse)
 def answer_question_get(
     q: str = Query(..., description="Natural language question"),
-    col: Optional[str] = Query(default=None, description='Collection to search: "medline", "plazi", "pmc", or "suppdata". Defaults to all collections.'),
-    n: Optional[int] = Query(default=None, description="Number of documents retrieved initially (default: 30). Higher values improve recall but slow down the response."),
-    mode: str = Query(default="hybrid", description='Answer mode: "hybrid", "extractive", or "generative"'),
+    col: Optional[str] = Query(default=None, description='Collection to search: "medline", "plazi", or "pmc". Defaults to all collections.'),
+    n: Optional[int] = Query(default=None, description="Number of documents retrieved initially (default: 10). Higher values improve recall but slow down the response."),
+    mode: str = Query(default="extractive", description='Answer mode: "extractive" or "generative"'),
 ):
     """
     GET endpoint — backwards-compatible with biodiversitypmc.sibils.org/api/QA.
@@ -412,24 +427,24 @@ def answer_batch(request: BatchRequest):
 @app.post("/qa/multi", response_model=MultiQAResponse)
 def answer_question_multi(request: QuestionRequest):
     """
-    Answer a question across all collections, ranked best-first.
+    Answer a question across all collections (medline, plazi, pmc), ranked best-first.
 
-    Retrieves from all 4 collections (medline, plazi, pmc, suppdata) in a
-    single call, ranks collections by their best document's relevance score,
-    then generates answers sequentially so the frontend can display the most
-    relevant collection on the left.
+    Retrieves from 3 collections in a single call, ranks by best document relevance,
+    then generates answers sequentially so the frontend can display the most relevant
+    collection on the left.
 
-    This avoids the 4-concurrent-vLLM-calls problem of calling /qa once per
-    collection — generation is always sequential regardless of how many
-    frontend tabs are open.
+    This avoids concurrent vLLM calls — generation is always sequential regardless
+    of how many frontend tabs are open.
     """
     try:
         p = get_pipeline()
+        mode, retrieval = _resolve_mode(request.mode, request.retrieval)
         result = p.run_multi_collection(
             question=request.question,
             retrieval_n=request.retrieval_n,
             final_n=request.final_n,
-            mode=request.mode,
+            mode=mode,
+            retrieval=retrieval,
             debug=request.debug,
         )
         return MultiQAResponse(**result)

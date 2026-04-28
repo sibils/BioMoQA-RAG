@@ -44,7 +44,7 @@ search_api_url = "https://biodiversitypmc.sibils.org/api/search"
 query_parser_api_url = "https://biodiversitypmc.dev.sibils.org/api/query/parse"
 
 # Default collections to search (comma-separated): medline, plazi, pmc, suppdata
-collections = ["medline", "plazi", "pmc", "suppdata"]
+collections = ["medline", "plazi", "pmc"]
 
 # HTTP User-Agent header for API requests
 user_agent = "BioMoQA-RAG/1.0 (https://github.com/sibils/BioMoQA-RAG)"

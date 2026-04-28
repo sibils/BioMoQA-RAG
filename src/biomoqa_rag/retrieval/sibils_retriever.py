@@ -53,7 +53,7 @@ class SIBILSRetriever:
     """
 
     # Valid collection names
-    VALID_COLLECTIONS = {"medline", "plazi", "pmc", "suppdata"}
+    VALID_COLLECTIONS = {"medline", "plazi", "pmc"}
 
     def __init__(
         self,
@@ -72,7 +72,7 @@ class SIBILSRetriever:
         Args:
             api_url: SIBILS API endpoint
             collection: Collection(s) to search. A single string ("medline", "plazi",
-                        "pmc", "suppdata") or a list of collections.
+                        "pmc") or a list of collections.
                         Defaults to ["medline", "plazi"].
             default_n: Default number of documents to retrieve
             timeout: Request timeout in seconds
