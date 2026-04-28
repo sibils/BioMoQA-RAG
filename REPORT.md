@@ -199,6 +199,8 @@ User question
 
 **FAISS index**: 4739 documents, rebuilt from `data/sibils_cache/cache` (dbm file accumulating all SIBILS API responses). Run `python rebuild_faiss_from_cache.py` to refresh as the cache grows.
 
+**Important**: `retrieval=rag` queries **both** SIBILS BM25 and FAISS in parallel — FAISS is additive, not a replacement for SIBILS. The difference from `retrieval=sibils` is that RAG additionally queries the dense index and fuses the two ranked lists via RRF before reranking. SIBILS BM25 coverage is the baseline in both modes; FAISS adds documents that SIBILS would miss (semantically related but lexically non-overlapping).
+
 ---
 
 ## 8. What could improve further
@@ -231,7 +233,7 @@ The generative path has more room to grow because it depends on components that 
 | Prompt | Current 2-4 sentence prompt | Structured prompts with explicit citation instructions; chain-of-thought for complex questions |
 | Context window | 8 docs × 600 chars | Longer snippets with better sentence-boundary truncation |
 
-**The biggest single lever**: growing the FAISS corpus. At 4739 docs, context recall from FAISS alone is low. At 100k+ docs (achievable by embedding PubMed Central's open-access bulk download), the semantic retrieval advantage of biomedical embeddings would fully materialise.
+**Note on FAISS corpus size**: because RAG always queries SIBILS as well, the FAISS corpus size is not a hard ceiling on recall — SIBILS already provides strong BM25 coverage. What a larger FAISS index adds is *semantic diversity*: documents about the same topic but phrased differently from the query, which BM25 misses. Growing the FAISS index (via `rebuild_faiss_from_cache.py`, or seeding from PubMed Central bulk abstracts) expands this semantic complement to SIBILS rather than replacing it.
 
 **Evaluation gap**: we have measured RAG+extractive (using BioBERT) but not RAG+generative directly on BioASQ. The generative path should be evaluated separately with metrics suited to multi-sentence synthesis (ROUGE, BERTScore, human evaluation) rather than exact-span F1.
 
