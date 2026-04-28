@@ -127,23 +127,26 @@ def main():
     extractor = BioExtractiveQA(device=-1)
     cfg = {"retrieval_n": 10, "final_n": 5}
 
+    # Each tuple: (label, alpha, faiss_index, docs_pkl, query_encoder_model)
+    # IMPORTANT: query encoder must match the model used to build the index.
     configs = [
-        ("alpha=0.3 (MiniLM)", 0.3, "data/faiss_index.bin", "data/documents.pkl",
-         "sentence-transformers/all-MiniLM-L6-v2"),
-        ("alpha=0.5 (MiniLM)", 0.5, "data/faiss_index.bin", "data/documents.pkl",
-         "sentence-transformers/all-MiniLM-L6-v2"),
-        ("alpha=0.7 (MiniLM)", 0.7, "data/faiss_index.bin", "data/documents.pkl",
-         "sentence-transformers/all-MiniLM-L6-v2"),
+        # Current production index: S-PubMedBert-MS-MARCO (biomedical retrieval-tuned)
+        ("PubMedBert-MSMARCO alpha=0.3", 0.3, "data/faiss_index.bin", "data/documents.pkl",
+         "pritamdeka/S-PubMedBert-MS-MARCO"),
+        ("PubMedBert-MSMARCO alpha=0.5", 0.5, "data/faiss_index.bin", "data/documents.pkl",
+         "pritamdeka/S-PubMedBert-MS-MARCO"),
+        ("PubMedBert-MSMARCO alpha=0.7", 0.7, "data/faiss_index.bin", "data/documents.pkl",
+         "pritamdeka/S-PubMedBert-MS-MARCO"),
     ]
 
-    # Add PubMedBERT config if index exists
-    pubmedbert_index = Path("data/faiss_pubmedbert/faiss_index.bin")
-    if pubmedbert_index.exists():
-        configs.append((
-            "alpha=0.5 (PubMedBERT)", 0.5,
-            str(pubmedbert_index),
-            "data/faiss_pubmedbert/documents.pkl",
-            "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract",
+    # Add old MiniLM backup index if it exists (built before migration)
+    miniLM_backup = Path("data/faiss_index.bin.bak")
+    if miniLM_backup.exists():
+        configs.insert(0, (
+            "MiniLM alpha=0.3 (old)", 0.3,
+            str(miniLM_backup),
+            "data/documents.pkl.bak",
+            "sentence-transformers/all-MiniLM-L6-v2",
         ))
 
     results = {}

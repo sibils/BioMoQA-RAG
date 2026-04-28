@@ -46,7 +46,7 @@ class RAGConfig:
 
     # Processing (streamlined)
     use_reranking: bool = True
-    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-12-v2"
     rerank_n: int = 15
     use_relevance_filter: bool = True
     final_n: int = 5
@@ -153,10 +153,10 @@ class RAGPipeline:
         print("✓ Using SIBILS BM25 retriever (extractive)")
 
         # ── RAG retriever (for generative mode): FAISS + BM25 + reranker ─
-        self.dense = DenseRetriever(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        self.dense = DenseRetriever(model_name="pritamdeka/S-PubMedBert-MS-MARCO")
         self.dense.load("data/faiss_index.bin", "data/documents.pkl")
         self.rag_retriever = SmartHybridRetriever(
-            self.sibils, self.dense, alpha=0.3, k=60
+            self.sibils, self.dense, alpha=0.5, k=60
         )
         print("✓ Using SmartHybridRetriever (RAG/generative)")
 

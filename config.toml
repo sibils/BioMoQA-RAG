@@ -55,7 +55,7 @@ cache_ttl = 604800  # 7 days in seconds
 
 [reranking]
 enabled = false  # disabled — matches old sibils.org QA behaviour
-model = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+model = "cross-encoder/ms-marco-MiniLM-L-12-v2"
 top_k = 7
 
 [extraction]
