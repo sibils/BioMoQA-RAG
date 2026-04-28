@@ -179,59 +179,12 @@ class SmartHybridRetriever:
             'mutation', 'variant', 'strain', 'species'
         }
 
-    def should_use_hybrid(self, query: str) -> str:
-        """
-        Decide which retrieval method to use.
-
-        Returns: 'bm25', 'dense', or 'hybrid'
-        """
-        query_lower = query.lower()
-        words = query_lower.split()
-
-        # Check for technical terms
-        has_technical = any(kw in query_lower for kw in self.technical_keywords)
-
-        # Short queries with technical terms -> BM25 (fastest)
-        if len(words) <= 5 and has_technical:
-            return 'bm25'
-
-        # Long semantic queries -> Dense (very fast)
-        if len(words) > 10 and not has_technical:
-            return 'dense'
-
-        # Everything else -> Hybrid (best quality)
-        return 'hybrid'
-
     def retrieve(self, query: str, n: int = 20, top_k: int = 20, collection: Optional[str | list[str]] = None):
         """
-        Smart retrieval that chooses method based on query.
+        Retrieve using parallel hybrid (BM25 + FAISS + RRF).
 
-        Args:
-            query: Search query
-            n: Number of documents from each source
-            top_k: Final number to return
-            collection: Override SIBILS collection(s)
-
-        Returns:
-            Top-k documents
+        Always runs both retrievers in parallel — the heuristic routing that
+        skipped FAISS for "technical" queries was defeating the purpose of the
+        hybrid index, since nearly all biomedical queries contain technical terms.
         """
-        # When a specific collection is requested, always use BM25 or hybrid —
-        # never dense-only. FAISS has limited per-collection coverage and its
-        # source filtering is unreliable, causing the same docs to bleed across
-        # collections. SIBILS BM25 knows the collection boundaries authoritatively.
-        if collection is not None:
-            return self.parallel.retrieve(query, n=n, top_k=top_k, collection=collection)
-
-        method = self.should_use_hybrid(query)
-
-        if method == 'bm25':
-            # Fast path: BM25 only
-            return self.sibils.retrieve(query, n=top_k, collection=collection)
-
-        elif method == 'dense':
-            # Fastest path: Dense only (no collection filter needed here — collection is None)
-            return self.dense.retrieve(query, top_k=top_k)
-
-        else:
-            # Best quality: Parallel hybrid
-            return self.parallel.retrieve(query, n=n, top_k=top_k, collection=collection)
+        return self.parallel.retrieve(query, n=n, top_k=top_k, collection=collection)
