@@ -156,7 +156,7 @@ class RAGPipeline:
         self.dense = DenseRetriever(model_name="sentence-transformers/all-MiniLM-L6-v2")
         self.dense.load("data/faiss_index.bin", "data/documents.pkl")
         self.rag_retriever = SmartHybridRetriever(
-            self.sibils, self.dense, alpha=0.5, k=60
+            self.sibils, self.dense, alpha=0.3, k=60
         )
         print("✓ Using SmartHybridRetriever (RAG/generative)")
 
