@@ -301,14 +301,14 @@ class RAGPipeline:
         retrieval_n: int,
         final_n: int,
         collection: Optional[str],
-        retrieval: str = "sibils",
+        retrieval: str = "elasticsearch",
     ):
         """Steps 1-4: retrieval → reranking → filtering → score normalization.
 
         Thread-safe (no GPU, only SIBILS HTTP + FAISS + CPU CrossEncoder).
         Returns (documents, num_retrieved).
         """
-        if retrieval == "rag":
+        if retrieval == "dense":
             documents = self.rag_retriever.retrieve(
                 question, n=retrieval_n, top_k=retrieval_n, collection=collection
             )
@@ -318,7 +318,7 @@ class RAGPipeline:
             )
         num_retrieved = len(documents)
 
-        if retrieval == "rag":
+        if retrieval == "dense":
             if len(documents) > final_n:
                 documents = self.reranker.rerank(
                     question, documents, top_k=min(self.config.rerank_n, len(documents))
@@ -552,7 +552,7 @@ class RAGPipeline:
         retrieval_n: Optional[int] = None,
         final_n: Optional[int] = None,
         mode: str = "generative",
-        retrieval: str = "sibils",
+        retrieval: str = "elasticsearch",
         debug: bool = False,
     ) -> Dict:
         """
@@ -659,7 +659,7 @@ class RAGPipeline:
         return_documents: bool = False,
         debug: bool = False,
         mode: str = "generative",
-        retrieval: str = "sibils",
+        retrieval: str = "elasticsearch",
     ) -> Dict:
         """
         Run the RAG pipeline.
@@ -673,7 +673,7 @@ class RAGPipeline:
             return_documents: Include documents in response
             debug: Include debug information
             mode: Answer strategy — "extractive" (BioBERT span) or "generative" (LLM)
-            retrieval: Retrieval strategy — "sibils" (BM25 only) or "rag" (FAISS + BM25 + reranker)
+            retrieval: Retrieval strategy — "elasticsearch" (BM25 only) or "dense" (FAISS + BM25 + reranker)
 
         Returns:
             Response dict with answer and metadata

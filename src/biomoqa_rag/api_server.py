@@ -196,12 +196,12 @@ class QuestionRequest(BaseModel):
     include_documents: bool = False
     debug: bool = False
     mode: str = "generative"        # "extractive" | "generative"
-    retrieval: str = "sibils"       # "sibils" (BM25 only) | "rag" (FAISS + reranker)
+    retrieval: str = "elasticsearch"  # "elasticsearch" (BM25 only) | "dense" (FAISS + BM25 + reranker)
 
     model_config = {"json_schema_extra": {"example": {
         "question": "What causes malaria?",
         "mode": "generative",
-        "retrieval": "rag",
+        "retrieval": "dense",
     }}}
 
 
@@ -295,10 +295,15 @@ def health_check():
 
 
 def _resolve_mode(mode: str, retrieval: str) -> tuple[str, str]:
-    """Map legacy 'hybrid' mode and return (mode, retrieval)."""
+    """Normalise mode/retrieval values; map legacy names to current ones."""
+    # Legacy mode aliases
     if mode == "hybrid":
-        # Legacy: hybrid = generative with RAG retrieval
-        return "generative", "rag"
+        return "generative", "dense"
+    # Legacy retrieval aliases
+    if retrieval == "sibils":
+        retrieval = "elasticsearch"
+    elif retrieval == "rag":
+        retrieval = "dense"
     return mode, retrieval
 
 
@@ -382,7 +387,7 @@ def answer_question_get(
     q: str = Query(..., description="Natural language question"),
     col: Optional[str] = Query(default=None, description='Collection to search: "medline", "plazi", or "pmc". Defaults to all collections.'),
     n: Optional[int] = Query(default=None, description="Number of documents retrieved initially (default: 10). Higher values improve recall but slow down the response."),
-    mode: str = Query(default="extractive", description='Answer mode: "extractive" or "generative"'),
+    mode: str = Query(default="extractive", description='Answer mode: "extractive" or "generative". Legacy "hybrid" maps to generative+dense.'),
 ):
     """
     GET endpoint — backwards-compatible with biodiversitypmc.sibils.org/api/QA.
