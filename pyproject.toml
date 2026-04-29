@@ -17,7 +17,7 @@ dependencies = [
     "sentencepiece>=0.1.99",
 
     # LLM Inference
-    "vllm>=0.6.4",  # VLLM_USE_V1=0 disables V1 engine (default in >=0.7) which causes CUDA subprocess issues on sibils-prod-ai
+    "vllm>=0.6.4,<0.20.0",  # 0.20.0 requires CUDA driver >12.0.8 (sibils-prod-ai has 12080)
 
     # Retrieval & Reranking
     "sentence-transformers>=2.2.2",

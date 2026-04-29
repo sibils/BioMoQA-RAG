@@ -28,9 +28,9 @@ results/*.json
 *.pt
 *.safetensors
 
-# Keep data files (FAISS index and documents)
-!data/faiss_index.bin
-!data/documents.pkl
+# FAISS index and documents — managed via ansible static_file_dir, not git
+data/faiss_index.bin
+data/documents.pkl
 
 # IDE
 .vscode/

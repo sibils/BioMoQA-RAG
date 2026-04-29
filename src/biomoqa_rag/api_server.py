@@ -11,6 +11,9 @@ Configuration is read from config.toml in the working directory.
 # VLLM_USE_V1 was removed in vLLM >=0.9 — use VLLM_ENABLE_V1_MULTIPROCESSING instead.
 import os
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+# Use a fixed shared HF cache so ansible pre-download and the service use the same path.
+# HF_HOME must be set before any huggingface_hub / transformers imports.
+os.environ.setdefault("HF_HOME", "/opt/sibils-qa/.cache/huggingface")
 # Use local HuggingFace cache — avoids 429 rate-limit errors on startup
 # when vLLM checks the repo file list. Model must be pre-downloaded.
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
