@@ -11,7 +11,7 @@ version = "0.1.0"
 dependencies = [
     # Deep Learning & Transformers
     "torch>=2.1.0",
-    "transformers>=4.36.0",
+    "transformers>=4.36.0,<4.52.0",  # 4.52+ removed the question-answering pipeline task
     "accelerate>=0.25.0",
     "bitsandbytes>=0.41.0",
     "sentencepiece>=0.1.99",
