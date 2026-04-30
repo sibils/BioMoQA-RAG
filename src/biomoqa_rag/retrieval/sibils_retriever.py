@@ -273,6 +273,14 @@ class SIBILSRetriever:
 
             if not data.get("success", False):
                 error = data.get("error", "Unknown error")
+                # SIBILS query transformation failures (their internal service down) →
+                # log and return empty rather than crashing the whole request.
+                if "query transformation" in error or "did not answer" in error:
+                    import logging
+                    logging.getLogger("biomoqa").warning(
+                        "SIBILS query transformation failed for collection %s: %s", collection, error
+                    )
+                    return [], 0
                 raise Exception(f"SIBILS API error: {error}")
 
             # Extract documents from response
