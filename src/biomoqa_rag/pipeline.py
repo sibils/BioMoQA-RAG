@@ -416,17 +416,10 @@ class RAGPipeline:
         ))
         if not cited_indices:
             cited_indices = [0]
-        # Return one item: the full answer text with all cited docs as lists.
+        # Return one item: the full answer text with all cited docs in the docs list.
         return [{
             "answer": clean_text,
             "answer_score": None,
-            "docid": None,
-            "doc_source": None,
-            "doc_retrieval_score": None,
-            "doc_text": None,
-            "snippet_start": None,
-            "snippet_end": None,
-            "docids": [self._format_docid(documents[i]) for i in cited_indices],
             "docs": [
                 {
                     "docid": self._format_docid(documents[i]),
@@ -436,6 +429,8 @@ class RAGPipeline:
                         (documents[i].title.strip() + ". " if documents[i].title and documents[i].title.strip() else "")
                         + (documents[i].abstract or "")
                     )[:800],
+                    "snippet_start": None,
+                    "snippet_end": None,
                 }
                 for i in cited_indices
             ],
@@ -453,12 +448,14 @@ class RAGPipeline:
         return {
             "answer": cand["text"],
             "answer_score": round(cand["score"], 4),
-            "docid": self._format_docid(doc),
-            "doc_source": getattr(doc, 'source', 'faiss'),
-            "doc_retrieval_score": round(float(getattr(doc, 'score', 0.0)), 3),
-            "doc_text": snippet,
-            "snippet_start": s - window_start,
-            "snippet_end": e - window_start,
+            "docs": [{
+                "docid": self._format_docid(doc),
+                "doc_source": getattr(doc, 'source', 'faiss'),
+                "doc_retrieval_score": round(float(getattr(doc, 'score', 0.0)), 3),
+                "doc_text": snippet,
+                "snippet_start": s - window_start,
+                "snippet_end": e - window_start,
+            }],
         }
 
     @property
@@ -532,12 +529,14 @@ class RAGPipeline:
                     answers.append({
                         "answer": cand["text"],
                         "answer_score": round(cand["score"], 4),
-                        "docid": self._format_docid(doc),
-                        "doc_source": getattr(doc, 'source', 'faiss'),
-                        "doc_retrieval_score": round(float(getattr(doc, 'score', 0.0)), 3),
-                        "doc_text": cand["passage"],
-                        "snippet_start": cand["span_start"],
-                        "snippet_end": cand["span_end"],
+                        "docs": [{
+                            "docid": self._format_docid(doc),
+                            "doc_source": getattr(doc, 'source', 'faiss'),
+                            "doc_retrieval_score": round(float(getattr(doc, 'score', 0.0)), 3),
+                            "doc_text": cand["passage"],
+                            "snippet_start": cand["span_start"],
+                            "snippet_end": cand["span_end"],
+                        }],
                     })
             responses.append(self._build_response(
                 question, answers, documents, num_retrieved,

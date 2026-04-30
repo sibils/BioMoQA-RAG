@@ -208,19 +208,21 @@ class QuestionRequest(BaseModel):
     }}}
 
 
+class DocItem(BaseModel):
+    """One source document attached to an answer."""
+    docid: Optional[str] = None
+    doc_source: Optional[str] = None        # "medline", "plazi", "pmc"
+    doc_retrieval_score: Optional[float] = None
+    doc_text: Optional[str] = None
+    snippet_start: Optional[int] = None     # Char offset of answer span in doc_text (extractive only)
+    snippet_end: Optional[int] = None       # Char offset of answer span in doc_text (extractive only)
+
+
 class AnswerItem(BaseModel):
-    """One ranked answer candidate — mirrors the old sibils.org answer object."""
+    """One answer — extractive (docs has 1 item with snippet offsets) or generative (docs has N cited items)."""
     answer: str
     answer_score: Optional[float] = None    # BioBERT span score; None for generative
-    docid: Optional[str] = None             # PMID, Plazi treatment ID, or PMC ID (extractive)
-    doc_source: Optional[str] = None        # Collection: "medline", "plazi", "pmc"
-    doc_retrieval_score: Optional[float] = None
-    doc_text: Optional[str] = None          # Context passage (extractive only)
-    snippet_start: Optional[int] = None     # Char offset of answer span in doc_text
-    snippet_end: Optional[int] = None       # Char offset of answer span in doc_text
-    # Generative-only: list of all cited documents
-    docids: Optional[List[str]] = None      # All cited doc IDs
-    docs: Optional[List[Dict]] = None       # All cited docs with docid/doc_text/doc_source
+    docs: List[DocItem] = []                # Always a list: 1 doc for extractive, N cited docs for generative
 
 
 class CollectionResult(BaseModel):
