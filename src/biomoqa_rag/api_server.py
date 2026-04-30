@@ -305,9 +305,7 @@ def _resolve_mode(mode: str, retrieval: str) -> tuple[str, str]:
     if mode == "hybrid":
         return "generative", "dense"
     # Legacy retrieval aliases
-    if retrieval in ("sibils", "elasticsearch"):
-        retrieval = "sparse"
-    elif retrieval == "rag":
+    if retrieval == "rag":
         retrieval = "dense"
     return mode, retrieval
 
