@@ -199,7 +199,7 @@ class QuestionRequest(BaseModel):
     include_documents: bool = False
     debug: bool = False
     mode: str = "generative"        # "extractive" | "generative"
-    retrieval: str = "elasticsearch"  # "elasticsearch" (BM25 only) | "dense" (FAISS + BM25 + reranker)
+    retrieval: str = "sparse"  # "sparse" (BM25 only) | "dense" (FAISS + BM25 + reranker)
 
     model_config = {"json_schema_extra": {"example": {
         "question": "What causes malaria?",
@@ -305,8 +305,8 @@ def _resolve_mode(mode: str, retrieval: str) -> tuple[str, str]:
     if mode == "hybrid":
         return "generative", "dense"
     # Legacy retrieval aliases
-    if retrieval == "sibils":
-        retrieval = "elasticsearch"
+    if retrieval in ("sibils", "elasticsearch"):
+        retrieval = "sparse"
     elif retrieval == "rag":
         retrieval = "dense"
     return mode, retrieval

@@ -301,7 +301,7 @@ class RAGPipeline:
         retrieval_n: int,
         final_n: int,
         collection: Optional[str],
-        retrieval: str = "elasticsearch",
+        retrieval: str = "sparse",
     ):
         """Steps 1-4: retrieval → reranking → filtering → score normalization.
 
@@ -551,7 +551,7 @@ class RAGPipeline:
         retrieval_n: Optional[int] = None,
         final_n: Optional[int] = None,
         mode: str = "generative",
-        retrieval: str = "elasticsearch",
+        retrieval: str = "sparse",
         debug: bool = False,
     ) -> Dict:
         """
@@ -658,7 +658,7 @@ class RAGPipeline:
         return_documents: bool = False,
         debug: bool = False,
         mode: str = "generative",
-        retrieval: str = "elasticsearch",
+        retrieval: str = "sparse",
     ) -> Dict:
         """
         Run the RAG pipeline.
@@ -672,7 +672,7 @@ class RAGPipeline:
             return_documents: Include documents in response
             debug: Include debug information
             mode: Answer strategy — "extractive" (BioBERT span) or "generative" (LLM)
-            retrieval: Retrieval strategy — "elasticsearch" (BM25 only) or "dense" (FAISS + BM25 + reranker)
+            retrieval: Retrieval strategy — "sparse" (BM25 only) or "dense" (FAISS + BM25 + reranker)
 
         Returns:
             Response dict with answer and metadata
