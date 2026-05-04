@@ -50,9 +50,8 @@ class BioExtractiveQA:
             return_offsets_mapping=True,
         )
         offsets = enc.pop("offset_mapping")[0]
-        token_type_ids = enc.get("token_type_ids")
-
         enc = {k: v.to(self.torch_device) for k, v in enc.items()}
+        token_type_ids = enc.get("token_type_ids")
         with torch.no_grad():
             out = self.model(**enc)
 
