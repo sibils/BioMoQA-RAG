@@ -246,10 +246,114 @@ The generative path has more room to grow because it depends on components that 
 | `evaluate_comparison.py` | Old system (SIBILS+BioBERT) vs new extractive pipeline on BioASQ |
 | `evaluate_retrieval.py` | SIBILS vs RAG retrieval: context recall, F1, doc count, latency |
 | `evaluate_alpha.py` | Sweep over RRF alpha and embedding model — isolates retrieval quality |
+| `evaluate_semantic.py` | Extractive vs generative vs SIBILS API; BERTScore + cosine similarity |
+| `evaluate_bioasq_qa.py` | **QA-only benchmark** — gold context supplied, retrieval bypassed (see §10) |
 | `rebuild_faiss_from_cache.py` | Rebuild FAISS index from SIBILS disk cache; `--model` flag for embedding choice |
 
 All evaluation scripts use `kroshan/BioASQ` (HuggingFace) deduplicated to unique factoid questions.
 
 ---
 
-*Last updated: 2026-04-28*
+## 10. Evaluation methodology: BioASQ QA-only benchmark
+
+### 10.1 The retrieval-bias problem
+
+All previous evaluations (§3, §6.5) ran the **full pipeline** on BioASQ questions. This conflates two distinct quality signals:
+
+1. **Retrieval quality** — does the system find the right document?
+2. **QA reader quality** — given a document, can the model extract the right answer?
+
+BioASQ factoid questions are derived from PubMed abstracts — each question was authored to be answered by a specific abstract passage. The SIBILS BM25 index covers Medline. When evaluation runs the full pipeline, the retriever may (or may not) return the exact source abstract. If it does, the QA model scores well not because it's a good reader, but because the answer was handed to it. If it doesn't, the QA model has no chance regardless of its reading ability.
+
+This means **F1 and context recall are correlated**: a good retrieval run looks like a good QA run. The confound is severe enough to mask real differences between QA models.
+
+### 10.2 The BioASQ dataset format
+
+`kroshan/BioASQ` on HuggingFace (`split="train"`) provides (question, answer, context) triples:
+
+```
+text field: <answer>GOLD_ANSWER <context>GOLD_CONTEXT</context>
+```
+
+The gold context is the PubMed passage that contains the answer verbatim — typically 300–2000 characters from a single abstract. This enables a **reading comprehension evaluation**: supply the gold passage directly to the QA model, measure whether it extracts the answer correctly.
+
+#### Sample entries
+
+| Question | Gold answer | Context length |
+|---|---|---|
+| What is the inheritance pattern of Li–Fraumeni syndrome? | autosomal dominant | 1480 chars |
+| Which type of lung cancer is afatinib used for? | EGFR-mutant NSCLC | 1491 chars |
+| What is the major adverse effect of adriamycin (doxorubicin)? | cardiotoxicity | 1303 chars |
+| Which is the branch site consensus in U12-dependent introns? | UUCCUUAAC | 1331 chars |
+| Which gene is most commonly mutated in Tay-Sachs disease? | HEXA | 1779 chars |
+
+Questions are diverse biomedical factoids: gene names, drug targets, disease mechanisms, molecular sequences. Gold answers are typically 1–5 tokens (named entities, short phrases).
+
+### 10.3 Evaluation design
+
+**Script**: `evaluate_bioasq_qa.py`
+
+Retrieval is bypassed entirely via `RAGPipeline.run_with_contexts(question, [gold_context], mode)` — the gold passage is wrapped as a Document and passed directly to the QA step.
+
+**Default sample**: 200 questions (`--limit` to override). `--extractive-only` skips generative (no GPU needed).
+
+### 10.4 Metrics and rationale
+
+#### For extractive (BioBERT)
+
+BioBERT performs span extraction: it selects a contiguous token span from the provided passage. Since the gold answer is guaranteed to be present in the passage, this is a proper reading comprehension test.
+
+| Metric | Rationale |
+|---|---|
+| **Exact Match (EM)** | Primary BioASQ official metric. Answer string matches gold exactly (after lowercasing and punctuation removal). |
+| **SQuAD F1** | Token overlap, partial credit. Standard for extractive QA since SQuAD. |
+| **ROUGE-L** | Longest common subsequence — catches correct partial spans. |
+
+#### For generative (Qwen3-8B)
+
+Generative models produce free-form prose. The gold answer ("autosomal dominant") may appear verbatim in a longer sentence ("The syndrome shows autosomal dominant inheritance"). Exact Match penalises this unfairly.
+
+| Metric | Rationale |
+|---|---|
+| **Answer Contains** | Does the normalized gold answer appear as a substring of the generated answer? Captures the case where the model is factually correct but verbose. Analogous to the *nugget recall* used in TREC RAG 2024. |
+| **BERTScore** | Semantic similarity via contextual embeddings. Handles paraphrase ("heart toxicity" ≈ "cardiotoxicity"). The standard semantic metric for generative QA. |
+| **ROUGE-L** | Still useful as a surface overlap signal. |
+| **SQuAD F1** | Included for cross-system comparability with extractive results. |
+
+#### TREC RAG 2024 context
+
+TREC RAG 2024 (the first TREC track specifically for RAG systems) moved beyond single-reference string metrics toward:
+
+- **Nugget-based evaluation (AutoNuggetizer)**: the gold answer is decomposed into atomic facts ("nuggets"); an LLM checks each nugget against the generated answer. This gives nugget recall and precision, handling the "correct but verbose" problem systematically.
+- **Faithfulness / AIS** (Attribution in Information-Seeking): each sentence of the generated answer is checked against the retrieved passages to verify it is grounded — not hallucinated.
+- **Citation precision/recall**: do cited passages actually support the claims made?
+
+For our evaluation, *Answer Contains* is a lightweight proxy for nugget recall appropriate to single-entity factoid answers. Full nugget decomposition and faithfulness scoring (requiring an LLM judge) are not implemented here but are the natural next step for evaluating multi-sentence generative answers.
+
+### 10.5 Results (200 BioASQ questions, 2026-05-04)
+
+| System | Answer rate | Exact Match | Answer Contains | SQuAD F1 | ROUGE-1 | BERTScore | Avg time |
+|---|---|---|---|---|---|---|---|
+| **Extractive (BioBERT)** | 100% | **50.5%** | 61.5% | **62.3%** | **64.7%** | **54.3%** | 0.11s |
+| **Generative (Qwen3-8B)** | 99.5% | 0.0% | **72.0%** | 8.4% | 9.3% | −9.0% | 3.58s |
+
+**Interpretation:**
+
+**Extractive** — BioBERT extracts the correct span 50.5% of the time (EM) from the gold passage. F1=62.3% shows good partial credit on near-misses (e.g. "epidermal growth factor receptor" for gold "EGFR"). This is a strong reading comprehension baseline given single-pass 512-token extraction.
+
+**Generative** — Qwen3-8B EM=0% is expected: the model never outputs bare short phrases. It produces prose like "Based on the provided documents, 15 tissue kallikrein genes have been identified..." rather than just "15". Answer Contains=72% shows that the gold fact is embedded in the generated answer 72% of the time — a meaningful signal.
+
+**The metric problem for generative** is clearly visible: F1=8.4% and BERTScore=−9% (below the rescaled baseline) are both artefacts of comparing a verbose sentence against a 1–5 token gold answer. ROUGE and SQuAD F1 are length-biased — a longer prediction dilutes precision badly. BERTScore rescaled against a short reference also breaks for long outputs. **Answer Contains is the right primary metric for generative factoid QA** and should be read as the generative equivalent of nugget recall. F1/ROUGE remain useful only for comparing two extractive systems.
+
+**Practical takeaway:** given the exact source passage, BioBERT finds the answer more precisely (EM=50.5%) while Qwen3 covers more answers but verbosely (Contains=72%). Neither replaces the other: extractive is fast and precise, generative handles questions where the answer requires synthesising a phrase rather than extracting a span.
+
+### 10.6 Why this benchmark is the right one
+
+- **No retrieval contamination** — the system cannot "cheat" by finding the source document.
+- **Controlled input** — both BioBERT and Qwen3 receive exactly the same passage; differences in score directly reflect reader quality.
+- **Interpretable ceiling** — since the gold answer is in the context by construction, a perfect extractive system would score EM=100%. Observed EM reveals how much the model degrades relative to the oracle.
+- **Separability** — the results from this benchmark combine cleanly with retrieval recall numbers to decompose end-to-end F1: `E2E_F1 ≈ retrieval_recall × reader_F1`.
+
+---
+
+*Last updated: 2026-05-04*
