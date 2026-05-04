@@ -72,7 +72,7 @@ _pipeline = None
 def get_pipeline():
     global _pipeline
     if _pipeline is None:
-        from src.biomoqa_rag.pipeline import RAGPipeline, RAGConfig
+        from biomoqa_rag.pipeline import RAGPipeline, RAGConfig
         print("  Loading pipeline (no LLM — extractive only)…")
         _pipeline = RAGPipeline(RAGConfig(use_vllm=False, use_cpu=False))
         print("  Pipeline ready.")

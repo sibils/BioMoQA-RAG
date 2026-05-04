@@ -76,7 +76,7 @@ def is_answered(text: str) -> bool:
 
 def load_pipeline(modes: list):
     """Load the RAG pipeline. Skips LLM loading when only running extractive mode."""
-    from src.biomoqa_rag.pipeline import RAGPipeline, RAGConfig
+    from biomoqa_rag.pipeline import RAGPipeline, RAGConfig
 
     if modes == ["extractive"]:
         # No LLM needed — disable both vLLM and CPU inference so only

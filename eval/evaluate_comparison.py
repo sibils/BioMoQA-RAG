@@ -79,7 +79,7 @@ _old_qa = None
 def get_old_components():
     global _old_retriever, _old_qa
     if _old_retriever is None:
-        from src.biomoqa_rag.retrieval.sibils_retriever import SIBILSRetriever
+        from biomoqa_rag.retrieval.sibils_retriever import SIBILSRetriever
         from transformers import pipeline as hf_pipeline
         print("  Loading old-mimic components (SIBILS BM25 medline + single-pass BioBERT)…")
         _old_retriever = SIBILSRetriever(collection="medline")
@@ -140,7 +140,7 @@ _pipeline = None
 def get_pipeline():
     global _pipeline
     if _pipeline is None:
-        from src.biomoqa_rag.pipeline import RAGPipeline, RAGConfig
+        from biomoqa_rag.pipeline import RAGPipeline, RAGConfig
         print("  Loading new pipeline (extractive, no LLM)…")
         config = RAGConfig(use_vllm=False, use_cpu=False)
         _pipeline = RAGPipeline(config)

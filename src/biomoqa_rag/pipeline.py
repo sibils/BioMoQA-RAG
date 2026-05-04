@@ -770,6 +770,50 @@ class RAGPipeline:
 
         return response
 
+    def run_with_contexts(
+        self,
+        question: str,
+        contexts: List[str],
+        mode: str = "extractive",
+    ) -> Dict:
+        """
+        Run QA on provided context strings, bypassing retrieval entirely.
+
+        Used for held-out evaluation where the gold context is known in advance
+        (e.g. BioASQ QA-only benchmark). Contexts are wrapped as Document objects
+        and fed directly into the extractive or generative QA step.
+        """
+        from .retrieval.sibils_retriever import Document
+
+        docs = [
+            Document(doc_id=f"ctx_{i}", title="", abstract=ctx, score=1.0, source="gold")
+            for i, ctx in enumerate(contexts)
+        ]
+
+        start_time = time.time()
+        answers = []
+
+        if mode == "extractive":
+            candidates = self.extractor.extract(question, docs, self.config.max_abstract_length)
+            for cand in candidates:
+                answers.append(self._build_answer_from_candidate(cand, docs))
+
+        elif mode == "generative":
+            messages = self._build_messages(question, docs)
+            raw_text = (
+                self._generate_vllm(messages)
+                if self.config.use_vllm
+                else self._generate_cpu(messages)
+            )
+            answers = self._answers_from_generation(question, raw_text, docs, mode)
+
+        return {
+            "question": question,
+            "answers": answers,
+            "mode_used": mode,
+            "pipeline_time": round(time.time() - start_time, 3),
+        }
+
     @staticmethod
     def _clean_for_llm(text: str) -> str:
         """Strip non-ASCII characters from document text before passing to LLM.

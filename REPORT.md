@@ -243,11 +243,11 @@ The generative path has more room to grow because it depends on components that 
 
 | Script | Purpose |
 |---|---|
-| `evaluate_comparison.py` | Old system (SIBILS+BioBERT) vs new extractive pipeline on BioASQ |
-| `evaluate_retrieval.py` | SIBILS vs RAG retrieval: context recall, F1, doc count, latency |
-| `evaluate_alpha.py` | Sweep over RRF alpha and embedding model — isolates retrieval quality |
-| `evaluate_semantic.py` | Extractive vs generative vs SIBILS API; BERTScore + cosine similarity |
-| `evaluate_bioasq_qa.py` | **QA-only benchmark** — gold context supplied, retrieval bypassed (see §10) |
+| `eval/evaluate_comparison.py` | Old system (SIBILS+BioBERT) vs new extractive pipeline on BioASQ |
+| `eval/evaluate_retrieval.py` | SIBILS vs RAG retrieval: context recall, F1, doc count, latency |
+| `eval/evaluate_alpha.py` | Sweep over RRF alpha and embedding model — isolates retrieval quality |
+| `eval/evaluate_semantic.py` | Extractive vs generative vs SIBILS API; BERTScore + cosine similarity |
+| `eval/evaluate_bioasq_qa.py` | **QA-only benchmark** — gold context supplied, retrieval bypassed (see §10) |
 | `rebuild_faiss_from_cache.py` | Rebuild FAISS index from SIBILS disk cache; `--model` flag for embedding choice |
 
 All evaluation scripts use `kroshan/BioASQ` (HuggingFace) deduplicated to unique factoid questions.
@@ -291,7 +291,7 @@ Questions are diverse biomedical factoids: gene names, drug targets, disease mec
 
 ### 10.3 Evaluation design
 
-**Script**: `evaluate_bioasq_qa.py`
+**Script**: `eval/evaluate_bioasq_qa.py`
 
 Retrieval is bypassed entirely via `RAGPipeline.run_with_contexts(question, [gold_context], mode)` — the gold passage is wrapped as a Document and passed directly to the QA step.
 

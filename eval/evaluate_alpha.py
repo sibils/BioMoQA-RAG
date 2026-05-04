@@ -69,7 +69,7 @@ def load_bioasq(limit=None):
 
 def run_config(questions, sibils_retriever, dense_retriever, alpha, extractor, cfg):
     """Run one alpha configuration over all questions."""
-    from src.biomoqa_rag.retrieval.parallel_hybrid import ParallelHybridRetriever
+    from biomoqa_rag.retrieval.parallel_hybrid import ParallelHybridRetriever
 
     hybrid = ParallelHybridRetriever(sibils_retriever, dense_retriever, alpha=alpha, k=60)
 
@@ -114,9 +114,9 @@ def main():
     n = len(rows)
     print(f"  {n} questions")
 
-    from src.biomoqa_rag.retrieval.sibils_retriever import SIBILSRetriever
-    from src.biomoqa_rag.retrieval.dense_retriever import DenseRetriever
-    from src.biomoqa_rag.extraction.extractive_qa import BioExtractiveQA
+    from biomoqa_rag.retrieval.sibils_retriever import SIBILSRetriever
+    from biomoqa_rag.retrieval.dense_retriever import DenseRetriever
+    from biomoqa_rag.extraction.extractive_qa import BioExtractiveQA
 
     print("Loading components…")
     sibils = SIBILSRetriever(
