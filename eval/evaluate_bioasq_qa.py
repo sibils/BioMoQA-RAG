@@ -116,6 +116,35 @@ def bertscore_f1(pred: str, gold: str) -> float:
     return float(F[0])
 
 
+def faithfulness_score(pred: str, context: str) -> float:
+    """Sentence-level grounding score (TREC AIS proxy).
+
+    For each sentence of the generated answer, compute ROUGE-1 recall against
+    the gold context (fraction of the sentence's tokens that appear in the
+    context). Return the mean across sentences.
+
+    High score (>0.6): answer is predominantly grounded in the context.
+    Low score (<0.3): answer introduces content not present in the context
+                      (potential hallucination or off-topic hedge).
+    """
+    if not pred.strip() or not context.strip():
+        return 0.0
+    pred_clean = re.sub(r"^Based on the provided documents?,?\s*", "", pred, flags=re.IGNORECASE)
+    sentences = [s.strip() for s in re.split(r"[.!?]", pred_clean)
+                 if s.strip() and len(s.strip().split()) >= 3]
+    if not sentences:
+        return 0.0
+    ctx_tokens = Counter(_normalize(context).split())
+    recalls = []
+    for sent in sentences:
+        toks = _normalize(sent).split()
+        if not toks:
+            continue
+        common = Counter(toks) & ctx_tokens
+        recalls.append(sum(common.values()) / len(toks))
+    return float(np.mean(recalls)) if recalls else 0.0
+
+
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
@@ -185,6 +214,7 @@ FIELDNAMES = [
     "system", "answer", "is_answered",
     "exact_match", "answer_contains",
     "f1", "rouge1", "rougeL", "bertscore",
+    "faithfulness",
     "time_s",
 ]
 
@@ -233,6 +263,7 @@ def run_eval(args):
             ac    = answer_contains(ans, golden) if answered else 0.0
             rouge = compute_rouge(ans, golden)   if answered else {"rouge1": 0.0, "rougeL": 0.0}
             bs    = bertscore_f1(ans, golden)    if answered else 0.0
+            faith = faithfulness_score(ans, context) if answered and system == "generative" else float("nan")
 
             print(
                 f"  [{system:11s}] {elapsed:.1f}s | "
@@ -254,6 +285,7 @@ def run_eval(args):
                 "rouge1":          round(rouge["rouge1"], 4),
                 "rougeL":          round(rouge["rougeL"], 4),
                 "bertscore":       round(bs, 4),
+                "faithfulness":    round(faith, 4) if not (isinstance(faith, float) and faith != faith) else "",
                 "time_s":          round(elapsed, 2),
             })
             out_file.flush()
@@ -279,6 +311,7 @@ def make_summary_and_plot(output_csv: Path):
 
     metrics       = ["exact_match", "answer_contains", "f1", "rouge1", "rougeL", "bertscore"]
     metric_labels = ["Exact Match", "Answer Contains", "SQuAD F1", "ROUGE-1", "ROUGE-L", "BERTScore"]
+    df["faithfulness"] = pd.to_numeric(df.get("faithfulness", float("nan")), errors="coerce")
     systems       = sorted(df["system"].unique())
     sys_labels    = {"extractive": "Extractive (BioBERT)", "generative": "Generative (Qwen3-8B)"}
     colors        = {"extractive": "#4C72B0", "generative": "#DD8452"}
@@ -291,6 +324,8 @@ def make_summary_and_plot(output_csv: Path):
         row = {"system": sys, "n": len(sub), "answer_rate": sub["is_answered"].mean()}
         for m in metrics:
             row[m] = sub[m].mean()
+        if sys == "generative" and "faithfulness" in sub.columns:
+            row["faithfulness"] = sub["faithfulness"].mean()
         row["avg_time"] = sub["time_s"].mean()
         summary_rows.append(row)
 
