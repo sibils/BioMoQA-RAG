@@ -198,6 +198,27 @@ class SIBILSRetriever:
         self._cache_set(question, collection, n, docs)
         return docs
 
+    def _parse_hits(self, data: dict, collection: str) -> List[Document]:
+        """Extract Document objects from a SIBILS JSON response."""
+        hits = data.get("elastic_output", {}).get("hits", {}).get("hits", [])
+        documents = []
+        for i, hit in enumerate(hits):
+            source = hit.get("_source", {})
+            plazi_text = source.get("text") or ""
+            plazi_title = source.get("treatment_title") or source.get("article-title") or ""
+            documents.append(Document(
+                doc_id=hit.get("_id", f"doc_{i}"),
+                title=source.get("title") or plazi_title,
+                abstract=source.get("abstract") or plazi_text,
+                full_text=source.get("full_text"),
+                score=float(hit.get("_score") or 0.0),
+                source=collection,
+                pmid=source.get("pmid"),
+                pmcid=source.get("pmcid"),
+                doi=source.get("doi"),
+            ))
+        return documents
+
     def _retrieve_single_uncached(
         self,
         question: str,
@@ -223,83 +244,46 @@ class SIBILSRetriever:
                 use_es_mode = True
 
         try:
+            docs = None
+
             if use_es_mode and parsed_query.es_query:
-                # Use POST with Elasticsearch query (jq parameter)
+                # Try POST with Elasticsearch query (jq parameter)
                 import json
-                params = {
-                    "col": collection,
-                    "n": n,
-                }
-                # SIBILS expects jq as form data, not JSON body
-                data = {
-                    "jq": json.dumps(parsed_query.es_query)
-                }
                 response = requests.post(
                     self.api_url,
-                    params=params,
-                    data=data,
+                    params={"col": collection, "n": n},
+                    data={"jq": json.dumps(parsed_query.es_query)},
                     timeout=self.timeout,
                 )
-            elif parsed_query and parsed_query.success and parsed_query.text_parts:
-                # Use keywords from parser (clean, no punctuation)
-                keywords = [part for part in parsed_query.text_parts
-                           if part not in ['?', '!', '.', ',']]
-                query_text = ' '.join(keywords) if keywords else question
+                response.raise_for_status()
+                data = response.json()
+                if data.get("success", False):
+                    docs = self._parse_hits(data, collection)
+                # If ES query succeeded but returned 0 hits, fall through to keyword GET below
 
-                params = {
-                    "q": query_text,
-                    "col": collection,
-                    "n": n,
-                }
+            if docs is None:
+                # Keyword GET: use parsed keywords if available, else raw question
+                if parsed_query and parsed_query.success and parsed_query.text_parts:
+                    keywords = [p for p in parsed_query.text_parts if p not in ['?', '!', '.', ',']]
+                    query_text = ' '.join(keywords) if keywords else question
+                else:
+                    query_text = question
+
                 response = requests.get(
                     self.api_url,
-                    params=params,
+                    params={"q": query_text, "col": collection, "n": n},
                     timeout=self.timeout,
                 )
-            else:
-                # Fallback to raw question
-                params = {
-                    "q": question,
-                    "col": collection,
-                    "n": n,
-                }
-                response = requests.get(
-                    self.api_url,
-                    params=params,
-                    timeout=self.timeout,
-                )
-            response.raise_for_status()
-            data = response.json()
+                response.raise_for_status()
+                data = response.json()
 
-            if not data.get("success", False):
-                error = data.get("error", "Unknown error")
-                raise Exception(f"SIBILS API error: {error}")
+                if not data.get("success", False):
+                    error = data.get("error", "Unknown error")
+                    raise Exception(f"SIBILS API error: {error}")
 
-            # Extract documents from response
-            hits = data.get("elastic_output", {}).get("hits", {}).get("hits", [])
-            documents = []
+                docs = self._parse_hits(data, collection)
 
-            for i, hit in enumerate(hits):
-                source = hit.get("_source", {})
-
-                # Plazi treatments store content in 'text' (not 'abstract')
-                plazi_text = source.get("text") or ""
-                plazi_title = source.get("treatment_title") or source.get("article-title") or ""
-
-                doc = Document(
-                    doc_id=hit.get("_id", f"doc_{i}"),
-                    title=source.get("title") or plazi_title,
-                    abstract=source.get("abstract") or plazi_text,
-                    full_text=source.get("full_text"),
-                    score=float(hit.get("_score") or 0.0),
-                    source=collection,
-                    pmid=source.get("pmid"),
-                    pmcid=source.get("pmcid"),
-                    doi=source.get("doi"),
-                )
-                documents.append(doc)
-
-            return documents
+            return docs
 
         except requests.exceptions.RequestException as e:
             raise Exception(f"Failed to query SIBILS API: {str(e)}")
