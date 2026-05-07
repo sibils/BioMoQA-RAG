@@ -78,7 +78,7 @@ _MULTI_CACHE_TTL = 120            # seconds
 
 
 def _get_or_run_multi(pipeline, question, mode, retrieval, retrieval_n, final_n, debug):
-    key = (question, mode, retrieval)
+    key = (question, mode, retrieval, retrieval_n, final_n)
     with _multi_cache_mutex:
         if key in _multi_cache:
             result, ts = _multi_cache[key]
@@ -299,6 +299,15 @@ def health_check():
     }
 
 
+_MAX_RETRIEVAL_N = 100
+
+
+def _clamp_retrieval_n(n: Optional[int]) -> Optional[int]:
+    if n is None:
+        return None
+    return max(1, min(n, _MAX_RETRIEVAL_N))
+
+
 def _resolve_mode(mode: str, retrieval: str) -> tuple[str, str]:
     """Normalise mode/retrieval values; map legacy names to current ones."""
     # Legacy mode aliases
@@ -368,7 +377,7 @@ def answer_question_post(request: QuestionRequest):
             question=request.question,
             mode=mode,
             retrieval=retrieval,
-            retrieval_n=request.retrieval_n,
+            retrieval_n=_clamp_retrieval_n(request.retrieval_n),
             final_n=request.final_n,
             debug=request.debug,
         )
@@ -449,7 +458,7 @@ def answer_question_multi(request: QuestionRequest):
         mode, retrieval = _resolve_mode(request.mode, request.retrieval)
         result = p.run_multi_collection(
             question=request.question,
-            retrieval_n=request.retrieval_n,
+            retrieval_n=_clamp_retrieval_n(request.retrieval_n),
             final_n=request.final_n,
             mode=mode,
             retrieval=retrieval,
