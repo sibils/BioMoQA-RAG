@@ -46,18 +46,9 @@ The HuggingFace version used for ingestion: https://huggingface.co/datasets/kros
 
 ---
 
-## License
-
-> ⚠️ **License status: pending verification.**
-> The BioASQ dataset does not carry a publicly documented redistribution license — terms of use are accessible to registered challenge participants only. Before depositing this subset in any public repository, the redistribution rights for derived works should be confirmed with the BioASQ organizers (contact: akrithara@iit.demokritos.gr).
->
-> The curation work (question selection, filtering, context alignment) produced at SIB is intended to be released under **CC BY 4.0**, subject to the above clarification.
-
----
-
 ## Produced by
 
 **Esteban Gaillac**, SIB Swiss Institute of Bioinformatics / HEG Genève
 ELIXIR KYBELE project — Deliverable D10.2 (Training Platform 2024–2026)
 
-GitHub repository: https://github.com/sib-swiss/BioMoQA-RAG
+GitHub repository: https://github.com/sibils/BioMoQA-RAG
