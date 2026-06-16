@@ -101,10 +101,15 @@ class BioExtractiveQA:
             return text[:window]
         tl = text.lower()
         weights = {w: 1.0 / (tl.count(w) + 1) for w in words}
-        step = max(1, window // 4)
+        step = max(1, window // 8)
         best_score, best_pos = -1.0, 0
         for pos in range(0, len(text) - window + 1, step):
-            score = sum(weights[w] for w in words if w in tl[pos:pos + window])
+            chunk = tl[pos:pos + window]
+            score = 0.0
+            for w in words:
+                idx = chunk.find(w)
+                if idx >= 0:
+                    score += weights[w] * (1.0 - 0.5 * idx / window)
             if score > best_score:
                 best_score, best_pos = score, pos
         return text[best_pos:best_pos + window]

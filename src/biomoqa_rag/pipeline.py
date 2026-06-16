@@ -850,14 +850,21 @@ class RAGPipeline:
         words = {w for w in re.findall(r'\w+', question.lower()) if len(w) > 2 and w not in stop}
         if not words:
             return text[:window]
-        text_lower = text.lower()
+        tl = text.lower()
         # IDF weight: rarer in the document → higher weight → more discriminative
-        weights = {w: 1.0 / (text_lower.count(w) + 1) for w in words}
-        step = max(1, window // 4)
+        weights = {w: 1.0 / (tl.count(w) + 1) for w in words}
+        step = max(1, window // 8)  # finer step for better placement
         best_score, best_pos = -1.0, 0
         for pos in range(0, len(text) - window + 1, step):
-            chunk = text_lower[pos:pos + window]
-            score = sum(weights[w] for w in words if w in chunk)
+            chunk = tl[pos:pos + window]
+            score = 0.0
+            for w in words:
+                idx = chunk.find(w)
+                if idx >= 0:
+                    # Prefer windows where high-weight keywords appear early —
+                    # keyword at window start scores full weight, at end scores half.
+                    # This keeps the answer within BioBERT's 512-token budget.
+                    score += weights[w] * (1.0 - 0.5 * idx / window)
             if score > best_score:
                 best_score, best_pos = score, pos
         return text[best_pos:best_pos + window]
