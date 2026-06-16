@@ -86,6 +86,29 @@ class BioExtractiveQA:
 
         return {"answer": answer, "score": best_score, "start": start_char, "end": end_char}
 
+    @staticmethod
+    def _best_passage(text: str, question: str, window: int) -> str:
+        """IDF-weighted window scan — same logic as RAGPipeline._best_passage."""
+        if len(text) <= window:
+            return text
+        import re
+        stop = {
+            'what', 'is', 'the', 'are', 'of', 'in', 'a', 'an', 'and', 'or',
+            'for', 'to', 'does', 'how', 'why', 'which', 'do', 'its', 'by',
+        }
+        words = {w for w in re.findall(r'\w+', question.lower()) if len(w) > 2 and w not in stop}
+        if not words:
+            return text[:window]
+        tl = text.lower()
+        weights = {w: 1.0 / (tl.count(w) + 1) for w in words}
+        step = max(1, window // 4)
+        best_score, best_pos = -1.0, 0
+        for pos in range(0, len(text) - window + 1, step):
+            score = sum(weights[w] for w in words if w in tl[pos:pos + window])
+            if score > best_score:
+                best_score, best_pos = score, pos
+        return text[best_pos:best_pos + window]
+
     def extract(self, question: str, documents: List, max_context_length: int = 800) -> List[Dict]:
         """
         Run single-pass extractive QA over documents.
@@ -93,10 +116,12 @@ class BioExtractiveQA:
         Returns candidates sorted by score descending.
         """
         full_contexts = [
-            ((doc.title.strip() + ". " if doc.title and doc.title.strip() else "") + (doc.abstract or ""))
+            (doc.title.strip() + ". " if doc.title and doc.title.strip() else "")
+            + (doc.full_text or doc.abstract or "")
             for doc in documents
         ]
-        valid = [(i, ctx[:_CONTEXT_LEN]) for i, ctx in enumerate(full_contexts) if ctx.strip()]
+        valid = [(i, self._best_passage(ctx, question, _CONTEXT_LEN))
+                 for i, ctx in enumerate(full_contexts) if ctx.strip()]
         if not valid:
             return []
 
