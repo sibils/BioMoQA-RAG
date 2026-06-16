@@ -829,12 +829,50 @@ class RAGPipeline:
         cleaned = re.sub(r'[ \t]+', ' ', cleaned).strip()
         return cleaned
 
+    @staticmethod
+    def _best_passage(text: str, question: str, window: int) -> str:
+        """Return the `window`-char slice of text with the highest IDF-weighted keyword score.
+
+        For short texts (abstracts) this is a no-op. For PMC full-text documents the
+        relevant measurement/description section is often buried thousands of chars in,
+        so we slide the window to find it rather than blindly taking the first N chars.
+
+        Uses IDF-style weighting (1/freq) so rare terms like "body" outweigh ubiquitous
+        terms like "zeuxevania" that appear dozens of times throughout the document.
+        """
+        if len(text) <= window:
+            return text
+        import re
+        stop = {
+            'what', 'is', 'the', 'are', 'of', 'in', 'a', 'an', 'and', 'or',
+            'for', 'to', 'does', 'how', 'why', 'which', 'do', 'its', 'by',
+        }
+        words = {w for w in re.findall(r'\w+', question.lower()) if len(w) > 2 and w not in stop}
+        if not words:
+            return text[:window]
+        text_lower = text.lower()
+        # IDF weight: rarer in the document → higher weight → more discriminative
+        weights = {w: 1.0 / (text_lower.count(w) + 1) for w in words}
+        step = max(1, window // 4)
+        best_score, best_pos = -1.0, 0
+        for pos in range(0, len(text) - window + 1, step):
+            chunk = text_lower[pos:pos + window]
+            score = sum(weights[w] for w in words if w in chunk)
+            if score > best_score:
+                best_score, best_pos = score, pos
+        return text[best_pos:best_pos + window]
+
     def _build_messages(self, question: str, documents: List) -> List[dict]:
         """Build chat messages for the LLM from question and retrieved documents.
 
         Returns a list of message dicts (system + user) for use with llm.chat().
         Uses llm_abstract_length (shorter than BioBERT's max_abstract_length) to
         stay well within vLLM's max_model_len=4096.
+
+        For PMC documents with full_text, uses a keyword-window scan to find the
+        most relevant passage rather than blindly truncating from the start — this
+        surfaces species descriptions, measurement tables, etc. that are buried deep
+        in the full text but not present in the abstract.
 
         `/no_think` at the end of the user message is Qwen3's soft switch for
         disabling chain-of-thought reasoning at the tokenizer/template level.
@@ -843,10 +881,11 @@ class RAGPipeline:
         llm_limit = self.config.llm_abstract_length
         context_parts = []
         for i, doc in enumerate(documents):
-            abstract = self._clean_for_llm(doc.abstract or '')[:llm_limit]
+            raw = doc.full_text or doc.abstract or ''
+            passage = self._best_passage(raw, question, llm_limit)
+            text = self._clean_for_llm(passage)
             title = self._clean_for_llm(doc.title or '')
-            docid = self._format_docid(doc) or str(i)
-            context_parts.append(f"[{i}] {title}\n{abstract}")
+            context_parts.append(f"[{i}] {title}\n{text}")
 
         context = "\n\n".join(context_parts)
         system = (
