@@ -162,6 +162,9 @@ def load_bioasq(limit: int | None = None) -> list[dict]:
         m_ctx = re.search(r"<context>\s*(.+?)(?:</context>|$)", text, re.DOTALL)
         gold    = m_ans.group(1).strip() if m_ans else ""
         context = m_ctx.group(1).strip() if m_ctx else ""
+        # Normalise question: ensure it ends with "?"
+        if q and not q.endswith("?"):
+            q = q.rstrip(".") + "?"
         if q and gold and context and q not in seen:
             seen.add(q)
             rows.append({"question": q, "golden_answer": gold, "gold_context": context})

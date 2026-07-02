@@ -1,10 +1,45 @@
 BioMoQA RAG Evaluation Summary
 ================================================================================
 
-Total questions: 120
-Exact Match: 0.00%
-Average F1: 2.29%
-Average ROUGE-1: 40.64%
-Average ROUGE-2: 18.37%
-Average ROUGE-L: 38.98%
-Average time: 7.27s
+Benchmark: unified set — 259 questions (200 BioASQ + 59 curated, deduplicated)
+
+── GOLD-CONTEXT EVALUATION (retrieval bypassed) ────────────────────────────────
+
+Sparse + Extractive (BioBERT):
+  Exact Match:      50.6%
+  SQuAD F1:         63.5%
+  Answer Contains:  59.1%
+  ROUGE-L:          65.5%
+  Faithfulness:     —
+  Avg time:          0.11 s
+
+Dense + Generative (Qwen3-8B):
+  Exact Match:      —
+  SQuAD F1:          9.6%
+  Answer Contains:  73.7%
+  ROUGE-L:          11.2%
+  Faithfulness:     57.6%
+  Avg time:          3.05 s
+
+── END-TO-END EVALUATION (full pipeline with retrieval) ─────────────────────────
+
+Sparse + Extractive (BioBERT):
+  Exact Match:      13.2%
+  SQuAD F1:         18.5%
+  Answer Contains:  15.8%
+  ROUGE-L:          19.8%
+  Faithfulness:     —
+  Avg time:          7.77 s
+
+Dense + Generative (Qwen3-8B):
+  Exact Match:       0.0%
+  SQuAD F1:          6.2%
+  Answer Contains:  46.7%
+  ROUGE-L:           6.7%
+  Faithfulness:     50.6%
+  Avg time:          8.93 s
+
+── RETRIEVAL TAX (Gold AC → E2E AC) ─────────────────────────────────────────────
+
+  Sparse + Extractive:  59.1% → 15.8%   (tax = −43.2 pp)
+  Dense  + Generative:  73.7% → 46.7%   (tax = −27.0 pp)

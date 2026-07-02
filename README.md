@@ -2,7 +2,7 @@
 
 Biomedical question-answering API for SIBILS. Supports extractive (BioBERT span) and generative (Qwen3-8B) answer modes with BM25 or hybrid dense retrieval over Medline, Plazi, and PMC.
 
-Running at: `http://sibils-prod-ai.lan.text-analytics.ch:9000`
+Demo: [qa.dev.sibils.org](https://qa.dev.sibils.org)
 
 ---
 

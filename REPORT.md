@@ -254,16 +254,18 @@ All evaluation scripts use `kroshan/BioASQ` (HuggingFace) deduplicated to unique
 
 ---
 
-## 10. Evaluation methodology: BioASQ QA-only benchmark
+## 10. Evaluation methodology: unified BioASQ benchmark (259 questions)
 
-### 10.1 End-to-end baseline (120 BioASQ questions, real retrieval)
+The benchmark combines 200 general BioASQ factoid questions (`kroshan/BioASQ`, HuggingFace) with 59 additional questions from a curated biomedical QA set, deduplicated to 259 unique questions. Each question carries a gold passage (the PubMed abstract the answer was drawn from), enabling both gold-context and end-to-end evaluation on the same set.
 
-The initial evaluation ran both strategies end-to-end on 120 BioASQ factoid questions using `pipeline.run()` with real retrieval.
+### 10.1 End-to-end results (259 questions, real retrieval)
 
-| Strategy | Answer rate | Answer Contains | SQuAD F1 | Avg time |
-|---|---|---|---|---|
-| **Sparse + Extractive** | 100% | 26.7% | 11.8% | 0.86s |
-| **Dense + Generative** | 100% | **48.3%** | 2.4% | 1.49s |
+Full pipeline evaluation using `pipeline.run()` with live retrieval against the SIBILS/FAISS index.
+
+| Strategy | Exact Match | Answer Contains | SQuAD F1 | ROUGE-L | Faithfulness | Avg time |
+|---|---|---|---|---|---|---|
+| **Sparse + Extractive** | 13.2% | 15.8% | 18.5% | 19.8% | — | 7.77s |
+| **Dense + Generative** | 0.0% | **46.7%** | 6.2% | 6.7% | **50.6%** | 8.93s |
 
 These numbers are hard to interpret in isolation: is a low score due to the retriever failing to return the right document, or the model failing to extract the right answer from a correct document? The next section unpacks this confound.
 
@@ -368,31 +370,31 @@ faithfulness(answer, context):
     return mean(recall)
 ```
 
-A score above 0.6 indicates the answer is predominantly grounded in the supplied passage. On our 200-question sample, generative answers average **faithfulness = 63.7%**: 79% of answers score above 0.5, and 98.5% above 0.3 — suggesting Qwen3 stays largely on-topic.
+A score above 0.6 indicates the answer is predominantly grounded in the supplied passage. On our 259-question benchmark, generative answers average **faithfulness = 57.6%** — suggesting Qwen3 stays largely on-topic, though a portion of answers draw on parametric knowledge beyond the supplied passage.
 
 For BioASQ factoid questions, *Answer Contains* also serves as a proxy for TREC-style **nugget recall**: the gold answer is already a single atomic fact (the nugget), so checking whether it appears in the generated text is equivalent to checking nugget recall. Full nugget decomposition (decomposing multi-sentence answers into atomic claims and verifying each) is the natural extension for complex synthesis questions.
 
-### 10.7 Results (200 BioASQ questions, gold context)
+### 10.7 Results (259 questions, gold context)
 
-| System | Answer rate | Exact Match | Answer Contains | SQuAD F1 | ROUGE-1 | BERTScore | Faithfulness | Avg time |
-|---|---|---|---|---|---|---|---|---|
-| **Extractive (BioBERT)** | 100% | **50.5%** | 61.5% | **62.3%** | **64.7%** | **54.3%** | — | 0.11s |
-| **Generative (Qwen3-8B)** | 99.5% | 0.0% | **72.0%** | 8.4% | 9.3% | −9.0% | **63.7%** | 3.58s |
+| System | Exact Match | Answer Contains | SQuAD F1 | ROUGE-L | Faithfulness | Avg time |
+|---|---|---|---|---|---|---|
+| **Extractive (BioBERT)** | **50.6%** | 59.1% | **63.5%** | **65.5%** | — | 0.11s |
+| **Generative (Qwen3-8B)** | — | **73.7%** | 9.6% | 11.2% | **57.6%** | 3.05s |
 
-**Extractive** — BioBERT extracts the correct span 50.5% of the time (EM) from the gold passage. F1=62.3% shows good partial credit on near-misses (e.g. "epidermal growth factor receptor" for gold "EGFR").
+**Extractive** — BioBERT extracts the correct span 50.6% of the time (EM) from the gold passage. F1=63.5% shows good partial credit on near-misses (e.g. "epidermal growth factor receptor" for gold "EGFR").
 
-**Generative** — Answer Contains=72% shows that the gold fact is embedded in the generated answer 72% of the time. Faithfulness=63.7% confirms that answers are mostly grounded in the supplied passage.
+**Generative** — Answer Contains=73.7% shows that the gold fact is embedded in the generated answer 73.7% of the time. Faithfulness=57.6% confirms answers are mostly grounded in the supplied passage.
 
-**The metric problem for generative** is clearly visible: F1=8.4% and BERTScore=−9% are both artefacts of comparing a verbose sentence against a 1–5 token gold answer. ROUGE and SQuAD F1 are length-biased; BERTScore rescaled against a short reference also breaks for long outputs. **Answer Contains is the right primary metric for generative factoid QA**.
+**The metric problem for generative** is clearly visible: F1=9.6% is an artefact of comparing a verbose sentence against a 1–5 token gold answer. ROUGE and SQuAD F1 are length-biased. **Answer Contains is the right primary metric for generative factoid QA**.
 
-**Practical takeaway:** extractive is fast and precise (EM=50.5%); generative covers more answers but verbosely (Contains=72%). Comparing with the end-to-end baseline (§10.1): Answer Contains drops to 26.7% / 48.3% when retrieval is imperfect — the decomposition `E2E ≈ retrieval_recall × reader_quality` holds (54% × 61.5% ≈ 33%, close to 26.7%).
+**Practical takeaway:** extractive is fast and precise (EM=50.6%); generative covers more answers but verbosely (Contains=73.7%). Comparing with the end-to-end results (§10.1): Answer Contains drops to 15.8% / 46.7% when retrieval is imperfect — a retrieval tax of −43 pp for extractive and −27 pp for generative — confirming that retrieval quality is the primary bottleneck.
 
 ### 10.8 Benchmark properties
 
 - **No retrieval contamination** — the system cannot "cheat" by finding the source document.
 - **Controlled input** — both BioBERT and Qwen3 receive exactly the same passage; differences in score directly reflect reader quality.
 - **Interpretable ceiling** — since the gold answer is in the context by construction, a perfect extractive system would score EM=100%. Observed EM reveals how much the model degrades relative to the oracle.
-- **Separability** — gold-context and end-to-end results decompose cleanly: `E2E ≈ retrieval_recall × reader_quality` (§10.1 and §10.7).
+- **Separability** — gold-context and end-to-end results decompose cleanly: `E2E ≈ retrieval_recall × reader_quality` (§10.1 and §10.7). Retrieval tax: −43 pp extractive, −27 pp generative.
 
 ---
 

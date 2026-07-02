@@ -54,5 +54,17 @@ temp/
 *.aux
 *.out
 *.toc
+*.nav
+*.snm
 *.pdf
 *.tex
+
+# Local data / models / untracked outputs
+data/faiss_pubmedbert/
+figures/
+models/
+finetune_biobert_cv.py
+tmp_biobert_fold*/
+ELIXIR\ Deliverable\ Report\ *
+ELIXIR_Deliverable_D10.2.md
+eval/run_unified_eval.py
