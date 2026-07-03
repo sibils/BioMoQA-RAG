@@ -11,6 +11,9 @@ Demo: [qa.dev.sibils.org](https://qa.dev.sibils.org)
 ```
 User question
     │
+    ├─ doc_refs provided ──► DocResolver (PMID / PMCID / DOI / title → Document)
+    │                              └─ skips retrieval entirely
+    │
     ├─ retrieval=sparse ──► SIBILSRetriever (BM25, disk-cached)
     │
     └─ retrieval=dense  ──► SmartHybridRetriever
@@ -29,6 +32,7 @@ User question
 **Recommended pairings:**
 - Extractive → `sparse` (BM25 precision optimal for span extraction)
 - Generative → `dense` (semantic coverage for synthesis)
+- Direct doc → `doc_refs` (bypass retrieval when you know the exact document)
 
 ---
 
@@ -55,6 +59,7 @@ Answer a question across all collections (medline, plazi, pmc), ranked best-firs
 | `retrieval` | `"sparse"` (BM25 only) · `"dense"` (FAISS+BM25+reranker) | `"sparse"` |
 | `retrieval_n` | int | config default (10) |
 | `final_n` | int | config default (5) |
+| `doc_refs` | list of strings | `null` — triggers direct-document mode (see below) |
 
 **Response:**
 ```json
@@ -85,13 +90,45 @@ Answer a question across all collections (medline, plazi, pmc), ranked best-firs
         }
       ]
     }
-  ]
+  ],
+  "unresolved_refs": null
 }
 ```
 
 **Answer shape:**
 - **Extractive**: `docs` has 1 element; `snippet_start`/`snippet_end` are char offsets into `doc_text`; `answer_score` is BioBERT confidence
 - **Generative**: `docs` has N cited elements; `snippet_start`/`snippet_end` are `null`; `answer_score` is `null`
+
+### Direct-document mode (`doc_refs`)
+
+Skip retrieval and target specific documents directly. Accepts PMID, PMCID, DOI, or a title fragment. Multiple refs from different collections are supported.
+
+```json
+{
+  "question": "What is the body length of Zeuxevania hubeni?",
+  "mode": "extractive",
+  "doc_refs": ["36273439"]
+}
+```
+
+```json
+{
+  "question": "What is the host of Plasmodium falciparum?",
+  "mode": "generative",
+  "doc_refs": ["PMC9712345", "12345678", "Zeuxevania hubeni new species"]
+}
+```
+
+| Ref format | Collection searched | Match strategy |
+|---|---|---|
+| All digits (1–8 chars) | medline | Exact PMID match |
+| `PMC\d+` | pmc | Exact PMCID match |
+| Starts with `10.` | all | Exact DOI match |
+| Anything else | all | Highest-scoring keyword hit |
+
+Unresolvable refs are reported in `unresolved_refs` in the response; resolved docs still get answered.
+
+QA runs on the document's full text (with IDF passage window), not just the abstract.
 
 ### `POST /qa`
 
@@ -160,6 +197,7 @@ BioMoQA-RAG/
 │   ├── config.py               # Config dataclasses (reads config.toml)
 │   ├── retrieval/
 │   │   ├── sibils_retriever.py # SIBILS BM25 API client (disk-cached)
+│   │   ├── doc_resolver.py     # Resolve PMID/PMCID/DOI/title → Document
 │   │   ├── dense_retriever.py  # FAISS semantic search
 │   │   ├── parallel_hybrid.py  # RRF fusion + SmartHybridRetriever
 │   │   ├── reranker.py         # CrossEncoder reranker
