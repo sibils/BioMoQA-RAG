@@ -814,6 +814,60 @@ class RAGPipeline:
             "pipeline_time": round(time.time() - start_time, 3),
         }
 
+    def run_with_documents(
+        self,
+        question: str,
+        documents: List,
+        mode: str = "generative",
+        return_documents: bool = False,
+        debug: bool = False,
+    ) -> Dict:
+        """
+        Run QA on pre-fetched Document objects, bypassing retrieval entirely.
+
+        Unlike run_with_contexts(), this preserves full Document metadata
+        (title, full_text, pmid, source, etc.) so the response includes
+        correct doc_source, docid, and full-text IDF passage selection.
+        """
+        start_time = time.time()
+        answers: List[Dict] = []
+
+        if mode == "extractive":
+            candidates = self.extractor.extract(question, documents, self.config.max_abstract_length)
+            for cand in candidates:
+                answers.append(self._build_answer_from_candidate(cand, documents))
+
+        elif mode == "generative":
+            messages = self._build_messages(question, documents)
+            raw_text = (
+                self._generate_vllm(messages)
+                if self.config.use_vllm
+                else self._generate_cpu(messages)
+            )
+            answers = self._answers_from_generation(question, raw_text, documents, mode)
+
+        result: Dict = {
+            "sibils_version": "biomoqa-2.0",
+            "success": True,
+            "error": "",
+            "question": question,
+            "collection": "+".join(sorted({d.source for d in documents})),
+            "model": "biobert" if mode == "extractive" else self.config.model_name.split("/")[-1],
+            "ndocs_requested": len(documents),
+            "ndocs_returned_by_SIBiLS": len(documents),
+            "answers": answers,
+            "mode_used": mode,
+            "pipeline_time": round(time.time() - start_time, 3),
+            "transformed_query": None,
+            "debug_info": {"doc_ids": [d.doc_id for d in documents]} if debug else None,
+        }
+        if return_documents:
+            result["documents"] = [
+                {"docid": d.doc_id, "title": d.title, "source": d.source, "pmid": d.pmid, "pmcid": d.pmcid}
+                for d in documents
+            ]
+        return result
+
     @staticmethod
     def _clean_for_llm(text: str) -> str:
         """Strip non-ASCII characters from document text before passing to LLM.

@@ -188,6 +188,17 @@ def get_pipeline():
     return pipeline
 
 
+_doc_resolver = None  # initialised lazily on first use, after pipeline is ready
+
+
+def get_doc_resolver():
+    global _doc_resolver
+    if _doc_resolver is None:
+        from .retrieval.doc_resolver import DocResolver
+        _doc_resolver = DocResolver(get_pipeline().sibils_retriever)
+    return _doc_resolver
+
+
 # ---------------------------------------------------------------------------
 # Request / Response models (aligned with biodiversitypmc.sibils.org/api/QA)
 # ---------------------------------------------------------------------------
@@ -200,6 +211,7 @@ class QuestionRequest(BaseModel):
     debug: bool = False
     mode: str = "generative"        # "extractive" | "generative"
     retrieval: str = "sparse"  # "sparse" (BM25 only) | "dense" (FAISS + BM25 + reranker)
+    doc_refs: Optional[List[str]] = None  # Skip retrieval; specify docs by PMID, PMCID, DOI, or title
 
     model_config = {"json_schema_extra": {"example": {
         "question": "What causes malaria?",
@@ -242,6 +254,7 @@ class MultiQAResponse(BaseModel):
     ndocs_retrieved: int
     model: str
     pipeline_time: Optional[float] = None
+    unresolved_refs: Optional[List[str]] = None  # doc_refs that could not be found in SIBILS
 
 
 class QAResponse(BaseModel):
@@ -300,6 +313,71 @@ def health_check():
 
 
 _MAX_RETRIEVAL_N = 100
+
+
+def _run_doc_refs_qa(
+    question: str,
+    doc_refs: List[str],
+    mode: str,
+    debug: bool = False,
+    include_documents: bool = False,
+) -> dict:
+    """Resolve doc_refs to Documents, run QA, return a MultiQAResponse-shaped dict."""
+    import time as _t
+
+    p = get_pipeline()
+    resolver = get_doc_resolver()
+    t0 = _t.time()
+
+    docs, unresolved = resolver.resolve_batch(doc_refs)
+
+    if not docs:
+        return {
+            "question": question,
+            "collection_results": [],
+            "mode_used": mode,
+            "ndocs_retrieved": 0,
+            "model": "",
+            "pipeline_time": round(_t.time() - t0, 3),
+            "unresolved_refs": unresolved if unresolved else None,
+        }
+
+    # Group docs by collection and run QA per group (same shape as run_multi_collection)
+    from collections import defaultdict
+    by_col: dict = defaultdict(list)
+    for doc in docs:
+        by_col[doc.source].append(doc)
+
+    collection_results = []
+    for rank, (col, col_docs) in enumerate(sorted(by_col.items()), start=1):
+        result = p.run_with_documents(
+            question=question,
+            documents=col_docs,
+            mode=mode,
+            return_documents=include_documents,
+            debug=debug,
+        )
+        collection_results.append({
+            "collection": col,
+            "rank": rank,
+            "answers": result.get("answers", []),
+            "mode_used": result.get("mode_used"),
+            "debug_info": result.get("debug_info") if debug else None,
+        })
+
+    model_name = (
+        "biobert" if mode == "extractive"
+        else p.config.model_name.split("/")[-1]
+    )
+    return {
+        "question": question,
+        "collection_results": collection_results,
+        "mode_used": mode,
+        "ndocs_retrieved": len(docs),
+        "model": model_name,
+        "pipeline_time": round(_t.time() - t0, 3),
+        "unresolved_refs": unresolved if unresolved else None,
+    }
 
 
 def _clamp_retrieval_n(n: Optional[int]) -> Optional[int]:
@@ -368,10 +446,22 @@ def answer_question_post(request: QuestionRequest):
     Temporarily routes to multi-collection pipeline so the frontend receives
     collection_results in one request instead of 4 separate calls that queue
     behind the vLLM lock. Revert once frontend switches to /qa/multi.
+
+    When doc_refs is provided, retrieval is skipped and QA runs directly on
+    the specified documents (by PMID, PMCID, DOI, or title fragment).
     """
     try:
-        p = get_pipeline()
         mode, retrieval = _resolve_mode(request.mode, request.retrieval)
+        if request.doc_refs:
+            result = _run_doc_refs_qa(
+                question=request.question,
+                doc_refs=request.doc_refs,
+                mode=mode,
+                debug=request.debug,
+                include_documents=request.include_documents,
+            )
+            return MultiQAResponse(**result)
+        p = get_pipeline()
         result = _get_or_run_multi(
             p,
             question=request.question,
@@ -454,8 +544,17 @@ def answer_question_multi(request: QuestionRequest):
     of how many frontend tabs are open.
     """
     try:
-        p = get_pipeline()
         mode, retrieval = _resolve_mode(request.mode, request.retrieval)
+        if request.doc_refs:
+            result = _run_doc_refs_qa(
+                question=request.question,
+                doc_refs=request.doc_refs,
+                mode=mode,
+                debug=request.debug,
+                include_documents=request.include_documents,
+            )
+            return MultiQAResponse(**result)
+        p = get_pipeline()
         result = p.run_multi_collection(
             question=request.question,
             retrieval_n=_clamp_retrieval_n(request.retrieval_n),
