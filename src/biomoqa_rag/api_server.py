@@ -217,6 +217,7 @@ class QuestionRequest(BaseModel):
         "question": "What causes malaria?",
         "mode": "generative",
         "retrieval": "dense",
+        "doc_refs": ["12345678", "PMC9712345"],
     }}}
 
 
