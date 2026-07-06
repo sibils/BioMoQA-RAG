@@ -487,7 +487,7 @@ def answer_question_post(request: QuestionRequest):
         )
 
 
-@app.get("/api/QA", response_model=QAResponse)
+@app.get("/QA", response_model=QAResponse)
 def answer_question_get(
     q: str = Query(..., description="Natural language question"),
     col: Optional[str] = Query(default=None, description='Collection to search: "medline", "plazi", or "pmc". Defaults to all collections.'),
