@@ -128,7 +128,9 @@ logger = logging.getLogger("biomoqa")
 app = FastAPI(
     title="BioMoQA RAG API",
     description="Biomedical question answering with SIBILS retrieval and sentence-level citations",
-    version="1.0.0"
+    version="1.0.0",
+    root_path="/api",
+    docs_url="/",
 )
 
 app.add_middleware(
@@ -618,21 +620,6 @@ def retrieval_info():
             "sibils_finds": "Papers with 'immune system', 'viral infections'",
             "dense_finds": "Papers about 'host defense', 'antiviral response' (semantic)",
             "combined": "Best coverage from both approaches"
-        }
-    }
-
-
-@app.get("/")
-def root():
-    """Root endpoint with API information"""
-    return {
-        "service": "BioMoQA RAG API",
-        "description": "Biomedical question answering with SIBILS retrieval",
-        "endpoints": {
-            "/health": "Health check",
-            "/qa": "Answer questions (POST)",
-            "/retrieval-info": "Explain hybrid retrieval",
-            "/docs": "API documentation"
         }
     }
 
