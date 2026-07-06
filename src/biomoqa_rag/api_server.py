@@ -58,7 +58,7 @@ _setup_mig_cuda()
 import logging
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
 
 import threading
@@ -124,13 +124,102 @@ logging.basicConfig(
 )
 logger = logging.getLogger("biomoqa")
 
+# ---------------------------------------------------------------------------
+# OpenAPI metadata
+# ---------------------------------------------------------------------------
+
+_APP_DESCRIPTION = """
+## BioMoQA RAG — Biomedical Question Answering
+
+Answers natural-language biomedical questions by combining **retrieval** from three literature
+collections with **LLM-based generation** (Qwen3-8B via vLLM) or **extractive span detection**
+(BioBERT).
+
+---
+
+### Pipeline
+
+```
+Question
+  └─▶ Retrieval  ── SIBILS BM25 (sparse)  ─┐
+                 └─ FAISS dense + reranker ─┴─▶ top-k docs
+       └─▶ Relevance filter
+             └─▶ Generation (Qwen3-8B) or Extraction (BioBERT)
+                   └─▶ Answer + sentence-level citations
+```
+
+---
+
+### Collections
+
+| ID | Source | Content |
+|----|--------|---------|
+| `medline` | PubMed / MEDLINE | Biomedical abstracts |
+| `pmc` | PubMed Central | Full-text open-access articles |
+| `plazi` | Plazi | Biodiversity & taxonomy literature |
+
+All three collections are queried by default. Restrict with `col` (GET endpoint) or use
+`doc_refs` to bypass retrieval entirely and target specific documents.
+
+---
+
+### Answer modes
+
+| `mode` | Model | Output |
+|--------|-------|--------|
+| `generative` | Qwen3-8B (GPU, vLLM) | Fluent answer with inline `[N]` sentence-level citations |
+| `extractive` | BioBERT (CPU/GPU) | Verbatim span lifted from the best matching document + confidence score |
+
+---
+
+### Retrieval strategies
+
+| `retrieval` | Method | Best for |
+|-------------|--------|----------|
+| `sparse` | SIBILS BM25 keyword search | Exact terms, gene/drug names, acronyms |
+| `dense` | BM25 + FAISS semantic search + cross-encoder reranker | Conceptual questions, synonyms, paraphrases |
+
+Legacy aliases: `mode=hybrid` → `generative + dense`; `retrieval=rag` → `dense`.
+
+---
+
+### Direct-document QA (`doc_refs`)
+
+Pass a list of PMIDs, PMCIDs, DOIs, or title fragments in `doc_refs` to skip retrieval
+and run QA directly on those documents. Useful when you already know which papers are relevant.
+"""
+
+_TAGS_METADATA = [
+    {
+        "name": "Question Answering",
+        "description": (
+            "Submit a biomedical question and receive answers backed by document citations. "
+            "`POST /qa` (recommended) queries all three collections in one request and returns "
+            "results ranked by relevance. `GET /QA` is a legacy single-collection endpoint "
+            "backwards-compatible with the old SIBILS QA API."
+        ),
+    },
+    {
+        "name": "Batch",
+        "description": (
+            "Submit multiple questions in a single request. Retrieval runs in parallel across "
+            "all questions; generation is sequential. Useful for bulk evaluation or dataset annotation."
+        ),
+    },
+    {
+        "name": "System",
+        "description": "Health check and pipeline introspection endpoints.",
+    },
+]
+
 # Initialize app
 app = FastAPI(
     title="BioMoQA RAG API",
-    description="Biomedical question answering with SIBILS retrieval and sentence-level citations",
+    description=_APP_DESCRIPTION,
     version="1.0.0",
     root_path="/api",
     docs_url="/",
+    openapi_tags=_TAGS_METADATA,
 )
 
 app.add_middleware(
@@ -202,82 +291,274 @@ def get_doc_resolver():
 
 
 # ---------------------------------------------------------------------------
-# Request / Response models (aligned with biodiversitypmc.sibils.org/api/QA)
+# Request / Response models
 # ---------------------------------------------------------------------------
 
 class QuestionRequest(BaseModel):
-    question: str
-    retrieval_n: Optional[int] = None
-    final_n: Optional[int] = None
-    include_documents: bool = False
-    debug: bool = False
-    mode: str = "generative"        # "extractive" | "generative"
-    retrieval: str = "sparse"  # "sparse" (BM25 only) | "dense" (FAISS + BM25 + reranker)
-    doc_refs: Optional[List[str]] = None  # Skip retrieval; specify docs by PMID, PMCID, DOI, or title
+    """Request body for `POST /qa` and `POST /qa/multi`."""
+
+    question: str = Field(
+        ...,
+        description="Natural-language biomedical question.",
+        examples=["What causes malaria?", "How does CRISPR-Cas9 edit DNA?"],
+    )
+    retrieval_n: Optional[int] = Field(
+        default=None,
+        ge=1, le=100,
+        description=(
+            "Number of documents fetched from SIBILS before reranking (default: 10, max: 100). "
+            "Higher values improve recall at the cost of latency (~0.2 s per 10 extra docs)."
+        ),
+    )
+    final_n: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Number of documents kept after relevance filtering and passed to the LLM (default: 5). "
+            "Smaller values produce more focused answers; larger values improve coverage."
+        ),
+    )
+    include_documents: bool = Field(
+        default=False,
+        description=(
+            "When `true`, the full abstract or document text is included in `doc_text` "
+            "for every `DocItem` in the response. Increases response size significantly."
+        ),
+    )
+    debug: bool = Field(
+        default=False,
+        description=(
+            "When `true`, adds internal pipeline diagnostics to `debug_info` in each "
+            "`CollectionResult`: per-document scores, reranker output, timing breakdown, etc."
+        ),
+    )
+    mode: str = Field(
+        default="generative",
+        description=(
+            "Answer mode:\n"
+            "- `generative` *(default)* — Qwen3-8B generates a fluent answer with inline `[N]` citations\n"
+            "- `extractive` — BioBERT extracts a verbatim span from the best matching document "
+            "and returns a confidence score\n"
+            "- `hybrid` *(legacy alias)* — mapped to `generative` + `dense` retrieval"
+        ),
+    )
+    retrieval: str = Field(
+        default="sparse",
+        description=(
+            "Retrieval strategy:\n"
+            "- `sparse` *(default)* — SIBILS BM25 keyword search; fast, best for exact terms and acronyms\n"
+            "- `dense` — BM25 + FAISS semantic search fused with RRF, then re-ranked by a cross-encoder; "
+            "better recall for conceptual or paraphrased questions\n"
+            "- `rag` *(legacy alias)* — mapped to `dense`"
+        ),
+    )
+    doc_refs: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Skip retrieval and run QA on specific documents. Each entry can be a PMID "
+            "(e.g. `12345678`), PMCID (e.g. `PMC9712345`), DOI, or title fragment. "
+            "Documents are fetched from SIBILS, grouped by collection, and QA is run per group."
+        ),
+    )
 
     model_config = {"json_schema_extra": {"example": {
         "question": "What causes malaria?",
         "mode": "generative",
         "retrieval": "dense",
-        "doc_refs": ["12345678", "PMC9712345"],
+        "retrieval_n": 20,
+        "final_n": 5,
     }}}
 
 
 class DocItem(BaseModel):
-    """One source document attached to an answer."""
-    docid: Optional[str] = None
-    doc_source: Optional[str] = None        # "medline", "plazi", "pmc"
-    doc_retrieval_score: Optional[float] = None
-    doc_text: Optional[str] = None
-    snippet_start: Optional[int] = None     # Char offset of answer span in doc_text (extractive only)
-    snippet_end: Optional[int] = None       # Char offset of answer span in doc_text (extractive only)
+    """A source document attached to an answer."""
+
+    docid: Optional[str] = Field(
+        None,
+        description="Document identifier: PMID for MEDLINE, PMCID for PMC, or Plazi UUID.",
+    )
+    doc_source: Optional[str] = Field(
+        None,
+        description="Collection the document comes from: `medline`, `pmc`, or `plazi`.",
+    )
+    doc_retrieval_score: Optional[float] = Field(
+        None,
+        description="Retrieval or reranking relevance score (higher = more relevant to the question).",
+    )
+    doc_text: Optional[str] = Field(
+        None,
+        description="Full abstract or document text. Only populated when `include_documents=true`.",
+    )
+    snippet_start: Optional[int] = Field(
+        None,
+        description="Character offset of the answer span start within `doc_text`. Extractive mode only.",
+    )
+    snippet_end: Optional[int] = Field(
+        None,
+        description="Character offset of the answer span end within `doc_text`. Extractive mode only.",
+    )
 
 
 class AnswerItem(BaseModel):
-    """One answer — extractive (docs has 1 item with snippet offsets) or generative (docs has N cited items)."""
-    answer: str
-    answer_score: Optional[float] = None    # BioBERT span score; None for generative
-    docs: List[DocItem] = []                # Always a list: 1 doc for extractive, N cited docs for generative
+    """A single answer candidate with its supporting documents."""
+
+    answer: str = Field(
+        ...,
+        description=(
+            "The answer text. "
+            "In **generative** mode: a fluent sentence synthesised by the LLM, with inline `[N]` "
+            "markers that correspond to entries in `docs`. "
+            "In **extractive** mode: a verbatim span copied from the source document."
+        ),
+    )
+    answer_score: Optional[float] = Field(
+        None,
+        description=(
+            "BioBERT span confidence score between 0 and 1. "
+            "Only present in extractive mode; `null` for generative answers."
+        ),
+    )
+    docs: List[DocItem] = Field(
+        default_factory=list,
+        description=(
+            "Supporting documents for this answer. "
+            "Extractive: exactly one item with `snippet_start`/`snippet_end` offsets. "
+            "Generative: one entry per sentence cited (matching the `[N]` markers in `answer`)."
+        ),
+    )
 
 
 class CollectionResult(BaseModel):
-    """Per-collection answer block, ordered by relevance rank."""
-    collection: str                      # "medline", "plazi", "pmc"
-    rank: int                            # 1 = best collection for this question
-    answers: List[AnswerItem]
-    mode_used: Optional[str] = None
-    debug_info: Optional[Dict] = None
+    """QA result for one literature collection."""
+
+    collection: str = Field(
+        ...,
+        description="Collection identifier: `medline`, `pmc`, or `plazi`.",
+    )
+    rank: int = Field(
+        ...,
+        description=(
+            "Relevance rank of this collection for the question (1 = best match). "
+            "Rank is determined by the score of the top retrieved document."
+        ),
+    )
+    answers: List[AnswerItem] = Field(
+        ...,
+        description="Answer candidates for this collection, ordered best-first.",
+    )
+    mode_used: Optional[str] = Field(
+        None,
+        description="Effective mode after legacy-alias resolution, e.g. `generative` or `extractive`.",
+    )
+    debug_info: Optional[Dict] = Field(
+        None,
+        description=(
+            "Internal pipeline diagnostics: per-document scores, reranker output, timing. "
+            "Only present when `debug=true`."
+        ),
+    )
 
 
 class MultiQAResponse(BaseModel):
-    """Response for /qa/multi — all collections ranked best-first."""
-    question: str
-    collection_results: List[CollectionResult]
-    mode_used: str
-    ndocs_retrieved: int
-    model: str
-    pipeline_time: Optional[float] = None
-    unresolved_refs: Optional[List[str]] = None  # doc_refs that could not be found in SIBILS
+    """Response from `POST /qa` and `POST /qa/multi` — results from all collections ranked best-first."""
+
+    question: str = Field(..., description="The question as submitted.")
+    collection_results: List[CollectionResult] = Field(
+        ...,
+        description=(
+            "Per-collection QA results, sorted by relevance rank (rank 1 first). "
+            "A collection is omitted if no documents were retrieved from it."
+        ),
+    )
+    mode_used: str = Field(
+        ...,
+        description="Effective answer mode used for this request (`generative` or `extractive`).",
+    )
+    ndocs_retrieved: int = Field(
+        ...,
+        description="Total number of documents retrieved across all collections before relevance filtering.",
+    )
+    model: str = Field(
+        ...,
+        description=(
+            "Short identifier of the model that produced the answers: "
+            "`biobert` for extractive mode, or the generative model name (e.g. `Qwen3-8B-FP8`)."
+        ),
+    )
+    pipeline_time: Optional[float] = Field(
+        None,
+        description="Total wall-clock time for the full pipeline in seconds.",
+    )
+    unresolved_refs: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Entries from `doc_refs` that could not be resolved to a document in SIBILS. "
+            "`null` when all refs were found or when `doc_refs` was not used."
+        ),
+    )
 
 
 class QAResponse(BaseModel):
-    """Response format aligned with biodiversitypmc.sibils.org/api/QA."""
-    sibils_version: str
-    success: bool
-    error: str
-    question: str
-    collection: str
-    model: str                          # "biobert" | short generative model name
-    ndocs_requested: int
-    ndocs_returned_by_SIBiLS: int
-    answers: List[AnswerItem]           # Ranked answer candidates (best first)
-    # Extra fields not in old API — kept for observability
-    mode_used: Optional[str] = None    # e.g. "hybrid:extractive"
-    pipeline_time: Optional[float] = None
-    transformed_query: None = None     # Not applicable (we use FAISS, not ES)
-    debug_info: Optional[Dict] = None
-    documents: Optional[List[Dict]] = None
+    """
+    Response from `GET /QA` — single-collection format, backwards-compatible with
+    `biodiversitypmc.sibils.org/api/QA`.
+    """
 
+    sibils_version: str = Field(..., description="API version string, e.g. `biomoqa-2.0`.")
+    success: bool = Field(..., description="`true` if the pipeline completed without error.")
+    error: str = Field(..., description="Error description when `success=false`; empty string on success.")
+    question: str = Field(..., description="The question as submitted.")
+    collection: str = Field(..., description="Collection queried.")
+    model: str = Field(
+        ...,
+        description="Model used: `biobert` for extractive mode, or short generative model name.",
+    )
+    ndocs_requested: int = Field(..., description="Number of documents requested from SIBILS.")
+    ndocs_returned_by_SIBiLS: int = Field(..., description="Number of documents actually returned by SIBILS.")
+    answers: List[AnswerItem] = Field(..., description="Ranked answer candidates, best first.")
+    mode_used: Optional[str] = Field(None, description="Effective mode after alias resolution.")
+    pipeline_time: Optional[float] = Field(None, description="Total pipeline wall-clock time in seconds.")
+    transformed_query: None = Field(None, description="Not used (reserved for Elasticsearch-based backends).")
+    debug_info: Optional[Dict] = Field(None, description="Internal diagnostics when `debug=true`.")
+    documents: Optional[List[Dict]] = Field(None, description="Full document objects when `include_documents=true`.")
+
+
+class BatchRequest(BaseModel):
+    """Request body for `POST /batch`."""
+
+    questions: List[str] = Field(
+        ...,
+        min_length=1,
+        description="List of questions to answer. Each is processed independently with parallel retrieval.",
+    )
+    retrieval_n: Optional[int] = Field(
+        None,
+        ge=1, le=100,
+        description="Documents to retrieve per question (default: 10, max: 100).",
+    )
+    final_n: Optional[int] = Field(
+        None,
+        ge=1,
+        description="Documents kept after relevance filtering per question (default: 5).",
+    )
+    col: Optional[str] = Field(
+        None,
+        description='Restrict to a single collection: `"medline"`, `"pmc"`, or `"plazi"`. Defaults to all.',
+    )
+
+    model_config = {"json_schema_extra": {"example": {
+        "questions": [
+            "What causes malaria?",
+            "What diseases are associated with ticks?",
+        ],
+        "retrieval_n": 10,
+        "col": "medline",
+    }}}
+
+
+# ---------------------------------------------------------------------------
+# Startup
+# ---------------------------------------------------------------------------
 
 @app.on_event("startup")
 def startup_event():
@@ -289,9 +570,24 @@ def startup_event():
     _ = p.extractor  # warm up BioBERT so first request is not slow
 
 
-@app.get("/health")
+# ---------------------------------------------------------------------------
+# System endpoints
+# ---------------------------------------------------------------------------
+
+@app.get(
+    "/health",
+    tags=["System"],
+    summary="Health check",
+    response_description="Service status and loaded model information",
+)
 def health_check():
-    """Health check endpoint"""
+    """
+    Returns the service status and, once the pipeline is initialised, the names of the
+    loaded models and the inference mode (CPU / GPU).
+
+    The `ready` field is `false` during startup (pipeline not yet loaded) and `true`
+    once the first request has triggered pipeline initialisation.
+    """
     config_info = {}
     if pipeline is not None:
         config_info = {
@@ -314,6 +610,65 @@ def health_check():
         "config": config_info
     }
 
+
+@app.get(
+    "/retrieval-info",
+    tags=["System"],
+    summary="Retrieval system overview",
+    response_description="Description of the hybrid retrieval pipeline and its components",
+)
+def retrieval_info():
+    """
+    Returns a human-readable description of the hybrid retrieval system: BM25 via SIBILS,
+    dense FAISS search, Reciprocal Rank Fusion, and the cross-encoder reranker.
+
+    Useful for understanding the tradeoffs between `sparse` and `dense` retrieval modes.
+    """
+    return {
+        "hybrid_retrieval": {
+            "description": "Combines SIBILS (BM25) and Dense (FAISS) retrieval",
+            "sibils_bm25": {
+                "description": "Keyword-based search via SIBILS API",
+                "corpus": "10,000+ PMC biomedical papers",
+                "speed": "~1.9s per query",
+                "best_for": "Exact terms, acronyms, technical queries"
+            },
+            "dense_faiss": {
+                "description": "Semantic vector search with local FAISS index",
+                "corpus": "2,398 biomedical documents",
+                "speed": "~0.07s per query (96% faster than SIBILS!)",
+                "best_for": "Semantic meaning, paraphrases, conceptual queries",
+                "model": "sentence-transformers/all-MiniLM-L6-v2"
+            },
+            "fusion": {
+                "method": "Reciprocal Rank Fusion (RRF)",
+                "execution": "Parallel (both run simultaneously)",
+                "result": "Best documents from both sources combined"
+            },
+            "smart_strategy": {
+                "technical_query": "Uses SIBILS only (e.g., 'What is AG1-IA?')",
+                "semantic_query": "Uses Dense only - 96% faster! (e.g., 'How does immune system work?')",
+                "general_query": "Uses both in parallel (e.g., 'What causes malaria?')"
+            }
+        },
+        "why_still_use_sibils": [
+            "SIBILS has 10,000+ papers (vs 2,398 in local index)",
+            "Best for exact medical terms and acronyms",
+            "Complements semantic search for comprehensive coverage",
+            "Running in parallel means no added time cost"
+        ],
+        "example": {
+            "query": "How does the immune system fight viral infections?",
+            "sibils_finds": "Papers with 'immune system', 'viral infections'",
+            "dense_finds": "Papers about 'host defense', 'antiviral response' (semantic)",
+            "combined": "Best coverage from both approaches"
+        }
+    }
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 _MAX_RETRIEVAL_N = 100
 
@@ -410,7 +765,7 @@ def _run_qa(
     retrieval_n: Optional[int] = None,
     final_n: Optional[int] = None,
 ) -> QAResponse:
-    """Shared logic for both POST /qa and GET /api/QA."""
+    """Shared logic for both POST /qa and GET /QA."""
     from .retrieval.sibils_retriever import SIBILSRetriever
     if col is not None and col not in SIBILSRetriever.VALID_COLLECTIONS:
         return QAResponse(
@@ -441,17 +796,41 @@ def _run_qa(
         )
 
 
-@app.post("/qa", response_model=MultiQAResponse)
+# ---------------------------------------------------------------------------
+# Question Answering endpoints
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/qa",
+    tags=["Question Answering"],
+    summary="Answer a question across all collections (recommended)",
+    response_model=MultiQAResponse,
+    response_description="Answers from all three collections, ranked by relevance",
+)
 def answer_question_post(request: QuestionRequest):
     """
-    Answer a biomedical question across all collections (POST).
+    **Main QA endpoint.** Answers a biomedical question by querying all three literature
+    collections (MEDLINE, PMC, Plazi) and returning results ranked by relevance.
 
-    Temporarily routes to multi-collection pipeline so the frontend receives
-    collection_results in one request instead of 4 separate calls that queue
-    behind the vLLM lock. Revert once frontend switches to /qa/multi.
+    ### How it works
 
-    When doc_refs is provided, retrieval is skipped and QA runs directly on
-    the specified documents (by PMID, PMCID, DOI, or title fragment).
+    1. Documents are retrieved from SIBILS (BM25) and optionally from the local FAISS
+       index, depending on the `retrieval` strategy.
+    2. Retrieved documents are reranked by a cross-encoder and filtered by relevance.
+    3. The top documents are passed to either Qwen3-8B (generative) or BioBERT (extractive).
+    4. Results from all three collections are returned in a single response, sorted so
+       the most relevant collection appears first (`rank=1`).
+
+    ### Caching
+
+    Identical requests (same question, mode, and retrieval parameters) within a 120-second
+    window are served from cache. This avoids redundant LLM calls when the frontend polls
+    multiple collection tabs simultaneously.
+
+    ### Direct-document QA
+
+    Set `doc_refs` to a list of PMIDs, PMCIDs, or DOIs to bypass retrieval entirely and
+    run QA on specific documents. Unresolved references are reported in `unresolved_refs`.
     """
     try:
         mode, retrieval = _resolve_mode(request.mode, request.retrieval)
@@ -487,64 +866,24 @@ def answer_question_post(request: QuestionRequest):
         )
 
 
-@app.get("/QA", response_model=QAResponse)
-def answer_question_get(
-    q: str = Query(..., description="Natural language question"),
-    col: Optional[str] = Query(default=None, description='Collection to search: "medline", "plazi", or "pmc". Defaults to all collections.'),
-    n: Optional[int] = Query(default=None, description="Number of documents retrieved initially (default: 10). Higher values improve recall but slow down the response."),
-    mode: str = Query(default="extractive", description='Answer mode: "extractive" or "generative". Legacy "hybrid" maps to generative+dense.'),
-):
-    """
-    GET endpoint — backwards-compatible with biodiversitypmc.sibils.org/api/QA.
-
-    Example: /api/QA?col=medline&q=What+causes+malaria%3F&n=5
-    """
-    return _run_qa(question=q, col=col, n=n, mode=mode)
-
-
-class BatchRequest(BaseModel):
-    questions: List[str]
-    retrieval_n: Optional[int] = None
-    final_n: Optional[int] = None
-    col: Optional[str] = None
-
-    model_config = {"json_schema_extra": {"example": {
-        "questions": [
-            "What causes malaria?",
-            "What diseases are associated with ticks?",
-        ],
-    }}}
-
-
-@app.post("/batch")
-def answer_batch(request: BatchRequest):
-    """
-    Answer multiple questions using the extractive model with parallel retrieval.
-
-    Retrieval (SIBILS + FAISS) runs concurrently across all questions.
-    Results are returned in the same order as the input questions.
-    """
-    p = get_pipeline()
-    results = p.run_batch(
-        questions=request.questions,
-        retrieval_n=request.retrieval_n,
-        final_n=request.final_n,
-        collection=request.col,
-    )
-    return {"results": results, "count": len(results)}
-
-
-@app.post("/qa/multi", response_model=MultiQAResponse)
+@app.post(
+    "/qa/multi",
+    tags=["Question Answering"],
+    summary="Answer a question across all collections (explicit multi endpoint)",
+    response_model=MultiQAResponse,
+    response_description="Answers from all three collections, ranked by relevance",
+)
 def answer_question_multi(request: QuestionRequest):
     """
-    Answer a question across all collections (medline, plazi, pmc), ranked best-first.
+    Identical to `POST /qa` but always runs the full multi-collection pipeline without
+    the shared cache. Use this endpoint when you need a fresh result, or for direct
+    integration that does not rely on cache deduplication.
 
-    Retrieves from 3 collections in a single call, ranks by best document relevance,
-    then generates answers sequentially so the frontend can display the most relevant
-    collection on the left.
+    Unlike `POST /qa`, concurrent calls to this endpoint will each trigger an independent
+    pipeline run (including a separate vLLM generation). For most use cases, `POST /qa`
+    is preferred.
 
-    This avoids concurrent vLLM calls — generation is always sequential regardless
-    of how many frontend tabs are open.
+    Supports `doc_refs` for direct-document QA in the same way as `POST /qa`.
     """
     try:
         mode, retrieval = _resolve_mode(request.mode, request.retrieval)
@@ -579,49 +918,82 @@ def answer_question_multi(request: QuestionRequest):
         )
 
 
-@app.get("/retrieval-info")
-def retrieval_info():
-    """Explain the hybrid retrieval system"""
-    return {
-        "hybrid_retrieval": {
-            "description": "Combines SIBILS (BM25) and Dense (FAISS) retrieval",
-            "sibils_bm25": {
-                "description": "Keyword-based search via SIBILS API",
-                "corpus": "10,000+ PMC biomedical papers",
-                "speed": "~1.9s per query",
-                "best_for": "Exact terms, acronyms, technical queries"
-            },
-            "dense_faiss": {
-                "description": "Semantic vector search with local FAISS index",
-                "corpus": "2,398 biomedical documents",
-                "speed": "~0.07s per query (96% faster than SIBILS!)",
-                "best_for": "Semantic meaning, paraphrases, conceptual queries",
-                "model": "sentence-transformers/all-MiniLM-L6-v2"
-            },
-            "fusion": {
-                "method": "Reciprocal Rank Fusion (RRF)",
-                "execution": "Parallel (both run simultaneously)",
-                "result": "Best documents from both sources combined"
-            },
-            "smart_strategy": {
-                "technical_query": "Uses SIBILS only (e.g., 'What is AG1-IA?')",
-                "semantic_query": "Uses Dense only - 96% faster! (e.g., 'How does immune system work?')",
-                "general_query": "Uses both in parallel (e.g., 'What causes malaria?')"
-            }
-        },
-        "why_still_use_sibils": [
-            "SIBILS has 10,000+ papers (vs 2,398 in local index)",
-            "Best for exact medical terms and acronyms",
-            "Complements semantic search for comprehensive coverage",
-            "Running in parallel means no added time cost"
-        ],
-        "example": {
-            "query": "How does the immune system fight viral infections?",
-            "sibils_finds": "Papers with 'immune system', 'viral infections'",
-            "dense_finds": "Papers about 'host defense', 'antiviral response' (semantic)",
-            "combined": "Best coverage from both approaches"
-        }
-    }
+@app.get(
+    "/QA",
+    tags=["Question Answering"],
+    summary="Answer a question — legacy GET endpoint",
+    response_model=QAResponse,
+    response_description="Single-collection answer, backwards-compatible with the old SIBILS QA API",
+)
+def answer_question_get(
+    q: str = Query(..., description="Natural-language biomedical question."),
+    col: Optional[str] = Query(
+        default=None,
+        description=(
+            'Collection to search. One of `"medline"`, `"pmc"`, or `"plazi"`. '
+            "Omit to search all collections (results merged)."
+        ),
+    ),
+    n: Optional[int] = Query(
+        default=None,
+        description=(
+            "Number of documents to retrieve from SIBILS (default: 10). "
+            "Higher values improve recall but increase latency."
+        ),
+    ),
+    mode: str = Query(
+        default="extractive",
+        description=(
+            'Answer mode: `"extractive"` (BioBERT span, default) or `"generative"` (Qwen3-8B). '
+            '`"hybrid"` is a legacy alias for `generative` + dense retrieval.'
+        ),
+    ),
+):
+    """
+    Legacy GET endpoint, backwards-compatible with `biodiversitypmc.sibils.org/api/QA`.
+
+    Returns a single `QAResponse` for one collection rather than the ranked multi-collection
+    format of `POST /qa`. Prefer `POST /qa` for new integrations.
+
+    **Example:**
+    ```
+    GET /api/QA?col=medline&q=What+causes+malaria%3F&n=5&mode=generative
+    ```
+    """
+    return _run_qa(question=q, col=col, n=n, mode=mode)
+
+
+# ---------------------------------------------------------------------------
+# Batch endpoint
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/batch",
+    tags=["Batch"],
+    summary="Answer multiple questions in parallel",
+    response_description="List of QA results in the same order as the input questions",
+)
+def answer_batch(request: BatchRequest):
+    """
+    Answers multiple questions in a single request.
+
+    Retrieval (SIBILS + FAISS) runs concurrently across all questions using a thread pool,
+    which significantly reduces wall-clock time compared to sequential calls.
+    Generation is sequential (one vLLM call per question).
+
+    Results are returned in the same order as the input `questions` list.
+
+    **Tip:** This endpoint always uses extractive mode for speed. For generative answers
+    over a list of questions, call `POST /qa` once per question.
+    """
+    p = get_pipeline()
+    results = p.run_batch(
+        questions=request.questions,
+        retrieval_n=request.retrieval_n,
+        final_n=request.final_n,
+        collection=request.col,
+    )
+    return {"results": results, "count": len(results)}
 
 
 def main():
