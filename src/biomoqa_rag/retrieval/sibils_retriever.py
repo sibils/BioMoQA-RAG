@@ -195,7 +195,8 @@ class SIBILSRetriever:
             return cached
 
         docs = self._retrieve_single_uncached(question, n, collection)
-        self._cache_set(question, collection, n, docs)
+        if docs:  # don't cache empty results — corpus may be updated
+            self._cache_set(question, collection, n, docs)
         return docs
 
     def _parse_hits(self, data: dict, collection: str) -> List[Document]:
