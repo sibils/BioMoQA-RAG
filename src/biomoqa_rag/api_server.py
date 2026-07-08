@@ -56,11 +56,12 @@ def _setup_mig_cuda():
 _setup_mig_cuda()
 
 import logging
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
 
+import requests
 import threading
 import time as _time
 from .config import get_config
@@ -962,6 +963,46 @@ def answer_question_get(
     ```
     """
     return _run_qa(question=q, col=col, n=n, mode=mode)
+
+
+# ---------------------------------------------------------------------------
+# Document fetch (proxy to SIBILS)
+# ---------------------------------------------------------------------------
+
+@app.get(
+    "/fetch",
+    tags=["Documents"],
+    summary="Fetch a document — proxy to the SIBILS fetch API",
+    response_description="Raw SIBILS fetch response (JSON), passed through unchanged",
+)
+def fetch_document(request: Request):
+    """
+    Same-origin proxy for the SIBILS document fetch API.
+
+    The document viewer (PMCA) loads full annotated documents from the same origin as
+    the app to avoid CORS. The app is served under `/api`, so the viewer calls
+    `GET /api/fetch?ids=...&col=...&format=...`. This endpoint forwards those query
+    parameters unchanged to the SIBILS fetch API and returns its response verbatim.
+
+    **Example:** `GET /api/fetch?col=pmc&format=PAM&ids=PMC4248671`
+    """
+    params = dict(request.query_params)
+    if not params.get("ids"):
+        raise HTTPException(status_code=400, detail="Missing required query parameter 'ids'")
+
+    # Derive the fetch URL from the configured SIBILS search URL (…/api/search → …/api/fetch)
+    base = get_config().sibils.search_api_url.rsplit("/", 1)[0]
+    fetch_url = f"{base}/fetch"
+    try:
+        upstream = requests.get(fetch_url, params=params, timeout=60)
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"SIBILS fetch failed: {exc}")
+
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        media_type=upstream.headers.get("content-type", "application/json"),
+    )
 
 
 # ---------------------------------------------------------------------------
