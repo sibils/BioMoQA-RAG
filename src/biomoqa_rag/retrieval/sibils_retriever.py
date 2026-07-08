@@ -65,6 +65,7 @@ class SIBILSRetriever:
         use_es_query: bool = True,  # Use full Elasticsearch query with concept annotations
         cache_dir: Optional[str] = "data/sibils_cache",
         cache_ttl: int = 604800,  # 7 days
+        empty_cache_ttl: int = 900,  # 15 min for 0-result queries
     ):
         """
         Initialize SIBILS retriever.
@@ -80,6 +81,9 @@ class SIBILSRetriever:
             use_es_query: Use Elasticsearch query (requires query parser)
             cache_dir: Directory for disk cache (None to disable)
             cache_ttl: Cache time-to-live in seconds (default 7 days)
+            empty_cache_ttl: Shorter TTL for empty (0-result) responses so a
+                             transient upstream zero self-heals instead of being
+                             replayed for the full cache_ttl (default 15 min)
         """
         self.api_url = api_url
         if collection is None:
@@ -101,6 +105,7 @@ class SIBILSRetriever:
         # Disk cache
         self._cache_path: Optional[str] = None
         self._cache_ttl: int = cache_ttl
+        self._empty_cache_ttl: int = empty_cache_ttl
         if cache_dir:
             Path(cache_dir).mkdir(parents=True, exist_ok=True)
             self._cache_path = str(Path(cache_dir) / "cache")
@@ -120,8 +125,13 @@ class SIBILSRetriever:
         try:
             with shelve.open(self._cache_path) as db:
                 entry = db.get(key)
-            if entry and time.time() - entry["ts"] < self._cache_ttl:
-                return entry["docs"]
+            if entry:
+                docs = entry["docs"]
+                # Empty results expire quickly so a transient upstream zero
+                # self-heals; real results keep the full TTL.
+                ttl = self._cache_ttl if docs else self._empty_cache_ttl
+                if time.time() - entry["ts"] < ttl:
+                    return docs
         except Exception:
             pass
         return None

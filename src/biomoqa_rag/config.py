@@ -49,6 +49,7 @@ class SibilsConfig(BaseModel):
     user_agent: str = "BioMoQA-RAG/1.0 (https://github.com/sibils/BioMoQA-RAG)"
     cache_dir: str = "data/sibils_cache"
     cache_ttl: int = 604800  # 7 days
+    empty_cache_ttl: int = 900  # 15 min for 0-result queries (avoids caching transient upstream zeros)
 
 
 class RerankingConfig(BaseModel):

@@ -271,6 +271,7 @@ def get_pipeline():
                 qa_device=config.extraction.device,
                 sibils_cache_dir=config.sibils.cache_dir,
                 sibils_cache_ttl=config.sibils.cache_ttl,
+                sibils_empty_cache_ttl=config.sibils.empty_cache_ttl,
                 sibils_collections=config.sibils.collections,
             )
 

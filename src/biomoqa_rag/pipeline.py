@@ -74,6 +74,7 @@ class RAGConfig:
     # SIBILS disk cache
     sibils_cache_dir: Optional[str] = "data/sibils_cache"
     sibils_cache_ttl: int = 604800  # 7 days
+    sibils_empty_cache_ttl: int = 900  # 15 min for 0-result queries
 
     # Performance
     enable_parallel: bool = True
@@ -146,6 +147,7 @@ class RAGPipeline:
             collection=self.config.sibils_collections,
             cache_dir=self.config.sibils_cache_dir,
             cache_ttl=self.config.sibils_cache_ttl,
+            empty_cache_ttl=self.config.sibils_empty_cache_ttl,
         )
 
         # ── SIBILS-only retriever (for extractive mode) ──────────────────
