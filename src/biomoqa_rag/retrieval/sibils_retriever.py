@@ -208,6 +208,34 @@ class SIBILSRetriever:
         self._cache_set(question, collection, n, docs)
         return docs
 
+    @staticmethod
+    def _with_abstract_filter(es_query: dict) -> dict:
+        """
+        Return a copy of *es_query* that also requires a non-empty abstract.
+
+        Many Medline citations are title-only (empty abstract). The extractive
+        model then 'extracts' the title, producing junk answers like "Disease".
+        A `wildcard: {abstract: "*"}` filter drops those at the source while
+        preserving recall (an empty-string abstract indexes no terms, so the
+        wildcard excludes it). Applied to Medline only — Plazi/PMC carry their
+        text in other fields.
+        """
+        import copy
+        q = copy.deepcopy(es_query)
+        query = q.get("query")
+        abstract_filter = {"wildcard": {"abstract": "*"}}
+        if isinstance(query, dict) and "bool" in query:
+            query["bool"].setdefault("filter", []).append(abstract_filter)
+        else:
+            # Wrap whatever query is present in a bool so we can attach the filter
+            q["query"] = {
+                "bool": {
+                    "must": [query] if query else [],
+                    "filter": [abstract_filter],
+                }
+            }
+        return q
+
     def _parse_hits(self, data: dict, collection: str) -> List[Document]:
         """Extract Document objects from a SIBILS JSON response."""
         hits = data.get("elastic_output", {}).get("hits", {}).get("hits", [])
@@ -216,7 +244,7 @@ class SIBILSRetriever:
             source = hit.get("_source", {})
             plazi_text = source.get("text") or ""
             plazi_title = source.get("treatment_title") or source.get("article-title") or ""
-            documents.append(Document(
+            doc = Document(
                 doc_id=hit.get("_id", f"doc_{i}"),
                 title=source.get("title") or plazi_title,
                 abstract=source.get("abstract") or plazi_text,
@@ -226,7 +254,13 @@ class SIBILSRetriever:
                 pmid=source.get("pmid"),
                 pmcid=source.get("pmcid"),
                 doi=source.get("doi"),
-            ))
+            )
+            # Safety net for the keyword-GET fallback (which has no ES filter):
+            # drop title-only Medline citations that carry no usable text.
+            if collection == "medline" and not (doc.abstract or "").strip() \
+                    and not (doc.full_text or "").strip():
+                continue
+            documents.append(doc)
         return documents
 
     def _retrieve_single_uncached(
@@ -259,10 +293,14 @@ class SIBILSRetriever:
             if use_es_mode and parsed_query.es_query:
                 # Try POST with Elasticsearch query (jq parameter)
                 import json
+                es_query = parsed_query.es_query
+                if collection == "medline":
+                    # Exclude title-only citations (empty abstract) at the source.
+                    es_query = self._with_abstract_filter(es_query)
                 response = requests.post(
                     self.api_url,
                     params={"col": collection, "n": n},
-                    data={"jq": json.dumps(parsed_query.es_query)},
+                    data={"jq": json.dumps(es_query)},
                     timeout=self.timeout,
                 )
                 response.raise_for_status()
