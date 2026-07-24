@@ -71,9 +71,10 @@ class BioExtractiveQA:
         n = len(start_logits)
         score_matrix = start_probs.unsqueeze(1) * end_probs.unsqueeze(0)  # [n, n]
         for i in range(n):
-            lo = max(0, i - _MAX_ANSWER_TOKENS)
-            score_matrix[i, :lo] = 0.0
+            # Valid span: end >= start, and length <= _MAX_ANSWER_TOKENS.
+            # Mask ends before the start (i) and ends beyond start+MAX.
             score_matrix[i, :i] = 0.0
+            score_matrix[i, i + _MAX_ANSWER_TOKENS + 1:] = 0.0
 
         flat = score_matrix.view(-1).argmax().item()
         best_start = flat // n

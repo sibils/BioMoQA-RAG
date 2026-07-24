@@ -441,7 +441,7 @@ class RAGPipeline:
     def _build_answer_from_candidate(self, cand: dict, documents: List) -> dict:
         """Build an answer dict from an extractive QA candidate."""
         doc = documents[cand["doc_idx"]]
-        # Show a window of ±300 chars around the answer span instead of the full passage.
+        # Show a window of ±500 chars around the answer span instead of the full passage.
         passage = cand["passage"]
         s, e = cand["span_start"], cand["span_end"]
         window_start = max(0, s - 500)
@@ -872,16 +872,28 @@ class RAGPipeline:
 
     @staticmethod
     def _clean_for_llm(text: str) -> str:
-        """Strip non-ASCII characters from document text before passing to LLM.
+        """Normalise document text before passing it to the LLM.
 
-        OCR'd documents (suppdata) and non-English papers often contain garbled
-        characters that cause Qwen3 to generate degenerate multilingual output.
-        Replacing non-ASCII with a space keeps the prose readable while removing
-        the tokens that trigger language-switching in the model.
+        The original CJK-garbage failure was caused by fp8 logit distortion (now
+        fixed by pinning the pre-quantized model), NOT by non-ASCII input — so
+        blanket-stripping all non-ASCII was corrupting load-bearing biomedical
+        content (µm -> m, ±0.2 -> 0.2, 37°C -> 37 C, TNF-α -> TNF-, accented
+        author names). Instead: NFKC-normalise and strip only the ranges that
+        actually provoke language-switching / degenerate output (CJK, Hangul,
+        Kana), plus private-use and control chars. Latin-1, Greek and common
+        scientific symbols (µ ± ° × α β …) are preserved — Qwen3 tokenizes them.
         """
         import re
-        # Replace non-ASCII with space, then collapse runs of whitespace
-        cleaned = re.sub(r'[^\x00-\x7F]+', ' ', text)
+        import unicodedata
+        text = unicodedata.normalize("NFKC", text)
+        # CJK / Kana / Hangul / CJK-compat / private-use — the tokens that
+        # trigger Qwen3 language-switching (same ranges as _is_garbage, plus PUA).
+        cleaned = re.sub(
+            r'[\u2e80-\u2eff\u3000-\u9fff\uac00-\ud7af\uf900-\ufaff\ue000-\uf8ff]+',
+            ' ', text,
+        )
+        # Control chars except tab/newline.
+        cleaned = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', ' ', cleaned)
         cleaned = re.sub(r'[ \t]+', ' ', cleaned).strip()
         return cleaned
 
