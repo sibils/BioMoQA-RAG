@@ -599,17 +599,25 @@ def health_check():
             "use_vllm": pipeline.config.use_vllm,
         }
 
+    # Report features from the live pipeline config rather than hardcoding True —
+    # reranking and relevance-filtering are disabled in the deployed config, so a
+    # hardcoded `true` here misleads operators and downstream consumers.
+    if pipeline is not None:
+        cfg = pipeline.config
+        features = {
+            "hybrid_retrieval": cfg.use_smart_retrieval,
+            "cross_encoder_reranking": cfg.use_reranking,
+            "relevance_filtering": cfg.use_relevance_filter,
+            "sentence_citations": True,
+            "cpu_inference": cfg.use_cpu,
+        }
+    else:
+        features = None  # pipeline not yet initialised
     return {
         "status": "healthy",
-        "features": {
-            "hybrid_retrieval": True,
-            "cross_encoder_reranking": True,
-            "relevance_filtering": True,
-            "sentence_citations": True,
-            "cpu_inference": True,
-        },
+        "features": features,
         "ready": pipeline is not None,
-        "config": config_info
+        "config": config_info,
     }
 
 
@@ -626,45 +634,45 @@ def retrieval_info():
 
     Useful for understanding the tradeoffs between `sparse` and `dense` retrieval modes.
     """
+    # Report live pipeline state instead of hardcoded/fictional facts. The old
+    # response named the wrong dense model, invented corpus sizes, and described a
+    # "smart_strategy" query router that the code does not implement.
+    dense_model = dense_corpus = rrf_alpha = rerank_model = None
+    rerank_enabled = collections = None
+    if pipeline is not None:
+        dense_model = getattr(pipeline.dense, "model_name", None)
+        dense_corpus = len(getattr(pipeline.dense, "documents", []) or [])
+        rrf_alpha = getattr(pipeline.rag_retriever, "alpha", None)
+        rerank_enabled = pipeline.config.use_reranking
+        rerank_model = pipeline.config.reranker_model
+        collections = pipeline.sibils.collection
     return {
-        "hybrid_retrieval": {
-            "description": "Combines SIBILS (BM25) and Dense (FAISS) retrieval",
-            "sibils_bm25": {
-                "description": "Keyword-based search via SIBILS API",
-                "corpus": "10,000+ PMC biomedical papers",
-                "speed": "~1.9s per query",
-                "best_for": "Exact terms, acronyms, technical queries"
-            },
-            "dense_faiss": {
-                "description": "Semantic vector search with local FAISS index",
-                "corpus": "2,398 biomedical documents",
-                "speed": "~0.07s per query (96% faster than SIBILS!)",
-                "best_for": "Semantic meaning, paraphrases, conceptual queries",
-                "model": "sentence-transformers/all-MiniLM-L6-v2"
-            },
-            "fusion": {
-                "method": "Reciprocal Rank Fusion (RRF)",
-                "execution": "Parallel (both run simultaneously)",
-                "result": "Best documents from both sources combined"
-            },
-            "smart_strategy": {
-                "technical_query": "Uses SIBILS only (e.g., 'What is AG1-IA?')",
-                "semantic_query": "Uses Dense only - 96% faster! (e.g., 'How does immune system work?')",
-                "general_query": "Uses both in parallel (e.g., 'What causes malaria?')"
-            }
+        "ready": pipeline is not None,
+        "default_retrieval": "sparse (SIBILS BM25 only)",
+        "sibils_bm25": {
+            "description": "Keyword-based full-text search via the SIBILS API (disk-cached)",
+            "collections": collections,
+            "best_for": "Exact terms, gene/drug names, acronyms",
         },
-        "why_still_use_sibils": [
-            "SIBILS has 10,000+ papers (vs 2,398 in local index)",
-            "Best for exact medical terms and acronyms",
-            "Complements semantic search for comprehensive coverage",
-            "Running in parallel means no added time cost"
-        ],
-        "example": {
-            "query": "How does the immune system fight viral infections?",
-            "sibils_finds": "Papers with 'immune system', 'viral infections'",
-            "dense_finds": "Papers about 'host defense', 'antiviral response' (semantic)",
-            "combined": "Best coverage from both approaches"
-        }
+        "dense_faiss": {
+            "description": "Local FAISS semantic search over a prebuilt index",
+            "model": dense_model,
+            "corpus_size": dense_corpus,
+            "best_for": "Conceptual questions, synonyms, paraphrases",
+        },
+        "fusion": {
+            "method": "Reciprocal Rank Fusion (RRF); BM25 and dense run in parallel",
+            "alpha": rrf_alpha,
+            "note": (
+                "alpha: 0 = BM25 only, 1 = dense only. Fusion + reranking apply only on the "
+                "'dense' retrieval path; the default 'sparse' path is BM25 only."
+            ),
+        },
+        "reranker": {
+            "enabled": rerank_enabled,
+            "model": rerank_model,
+            "note": "Cross-encoder rerank applied on the 'dense' path when enabled.",
+        },
     }
 
 
@@ -1049,8 +1057,11 @@ def main():
 
     logger.info(f"Starting server on {host}:{port} with {workers} worker(s)")
 
+    # Import string must match the installed package name (biomoqa_rag), not the
+    # src-layout dir 'src' — there is no src/__init__.py, so 'src.biomoqa_rag…'
+    # fails with ModuleNotFoundError under the pip-installed deployment.
     uvicorn.run(
-        "src.biomoqa_rag.api_server:app",
+        "biomoqa_rag.api_server:app",
         host=host,
         port=port,
         workers=workers,
