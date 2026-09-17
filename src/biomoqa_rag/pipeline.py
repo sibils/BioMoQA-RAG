@@ -911,8 +911,22 @@ class RAGPipeline:
         tl = text.lower()
         # IDF weight: rarer in the document → higher weight → more discriminative
         weights = {w: 1.0 / (tl.count(w) + 1) for w in words}
+
+        # The rarest term present is what makes a window on-topic: a species epithet
+        # inside a genus revision, say. A window that misses it is describing
+        # something else, however many common terms it happens to contain. Without
+        # this, a comparison table's "Body length" header outranks the single row
+        # naming the species actually being asked about.
+        present = {w: tl.count(w) for w in words if tl.count(w) > 0}
+        anchors = []
+        if present:
+            rarest = min(present.values())
+            if rarest <= 3:
+                anchors = [w for w, c in present.items() if c == rarest]
+
         step = max(1, window // 8)  # finer step for better placement
         best_score, best_pos = -1.0, 0
+        best_anchored_score, best_anchored_pos = -1.0, None
         for pos in range(0, len(text) - window + 1, step):
             chunk = tl[pos:pos + window]
             score = 0.0
@@ -925,6 +939,13 @@ class RAGPipeline:
                     score += weights[w] * (1.0 - 0.5 * idx / window)
             if score > best_score:
                 best_score, best_pos = score, pos
+            if anchors and any(a in chunk for a in anchors) and score > best_anchored_score:
+                best_anchored_score, best_anchored_pos = score, pos
+
+        # An anchored window always wins over a higher-scoring window that omits
+        # every discriminative term.
+        if best_anchored_pos is not None:
+            best_pos = best_anchored_pos
         return text[best_pos:best_pos + window]
 
     def _build_messages(self, question: str, documents: List) -> List[dict]:
