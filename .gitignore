@@ -68,3 +68,6 @@ tmp_biobert_fold*/
 ELIXIR\ Deliverable\ Report\ *
 ELIXIR_Deliverable_D10.2.md
 eval/run_unified_eval.py
+
+# Local SIBILS response cache (regenerable, large)
+data/sibils_cache/
