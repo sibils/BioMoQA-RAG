@@ -58,6 +58,7 @@ class RAGConfig:
     use_cpu: bool = False  # Use CPU inference with transformers instead of vLLM
     quantization: Optional[str] = "fp8"  # FP8 quantization (GPU only)
     gpu_memory_utilization: float = 0.83
+    max_model_len: int = 4096
     max_tokens: int = 384
     temperature: float = 0.1
 
@@ -209,7 +210,7 @@ class RAGPipeline:
             vllm_kwargs = {
                 "model": self.config.model_name,
                 "trust_remote_code": True,
-                "max_model_len": 4096,
+                "max_model_len": self.config.max_model_len,
                 "gpu_memory_utilization": self.config.gpu_memory_utilization,
                 "disable_log_stats": True,
             }

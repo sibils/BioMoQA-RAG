@@ -29,6 +29,9 @@ class ModelConfig(BaseModel):
     model_name: str = "Qwen/Qwen3-8B"
     gpu_memory_utilization: float = 0.83
     quantization: Optional[str] = "fp8"
+    # Context window vLLM allocates KV cache for. Raise only with the VRAM to back
+    # it: KV cache for Qwen3-8B costs ~144 KB per token.
+    max_model_len: int = 4096
 
 
 class GenerationConfig(BaseModel):

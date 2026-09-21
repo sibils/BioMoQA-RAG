@@ -32,7 +32,9 @@ biomoqa_mode: "gpu"
 biomoqa_model_size: "3b"
 
 # GPU settings
+biomoqa_model_name: "Qwen/Qwen3-8B-FP8"  # pre-quantized; see note in config.toml.j2
 biomoqa_gpu_memory_utilization: 0.83
+biomoqa_max_model_len: 4096  # 16384 fits comfortably on a 40GB partition
 biomoqa_quantization: "fp8"  # Set to null/empty to disable
 
 # ============================================

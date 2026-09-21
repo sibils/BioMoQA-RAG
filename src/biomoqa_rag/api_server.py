@@ -269,6 +269,7 @@ def get_pipeline():
                 truncate_abstracts=config.context.truncate_abstracts,
                 quantization=config.model.quantization,
                 gpu_memory_utilization=config.model.gpu_memory_utilization,
+                max_model_len=config.model.max_model_len,
                 qa_device=config.extraction.device,
                 sibils_cache_dir=config.sibils.cache_dir,
                 sibils_cache_ttl=config.sibils.cache_ttl,

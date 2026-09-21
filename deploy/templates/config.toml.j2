@@ -14,8 +14,13 @@ mode = "{{ biomoqa_mode }}"
 # Model size for CPU mode: "0.5b", "1.5b", "3b", "7b"
 size = "{{ biomoqa_model_size }}"
 
+# Weights to load. Must be a pre-quantized FP8 checkpoint if quantization = "fp8"
+# on A100: dynamic fp8 over base Qwen3-8B produces garbage output there.
+model_name = "{{ biomoqa_model_name }}"
+
 # GPU settings
 gpu_memory_utilization = {{ biomoqa_gpu_memory_utilization }}
+max_model_len = {{ biomoqa_max_model_len }}
 {% if biomoqa_quantization %}
 quantization = "{{ biomoqa_quantization }}"
 {% else %}
