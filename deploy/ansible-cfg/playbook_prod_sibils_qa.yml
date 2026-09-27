@@ -1,0 +1,78 @@
+---
+# Goes in bitem-heg-geneve/ansible-cfg as playbook_prod_sibils_qa.yml
+#
+# Identical to playbook_dev_sibils_qa.yml except for three things:
+#   repo_version         master -> prod_5.1.5.10   (prod never tracks a moving branch)
+#   static_file_dir      points at this playbook's own files/ directory
+#   service_environment  dev -> prod               (Prometheus label)
+#
+# NOTE: if the current prod playbook sets CUDA_VISIBLE_DEVICES for the MIG partition,
+# carry that over here. The dev playbook does not set it, but DEPLOY_GUIDE records that
+# sibils-prod-ai runs the A100 in MIG mode, where an unset CUDA_VISIBLE_DEVICES makes
+# cuda:0 resolve to the inaccessible physical GPU and vLLM fails with
+# "CUDA driver error: operation not supported". Get the UUID with `nvidia-smi -L`.
+
+- name: Install SIBiLS - SIBiLS QA
+  hosts: all
+  roles:
+    - role: bitem.install_python
+      vars:
+        version: "3.13"
+    - role: bitem.python_service_from_git
+      vars:
+        python_path: "{{ python_path }}"  # python_path is set by bitem.install_python
+        service_name: "sibils-qa"  # do not change this
+        service_description: "SIBiLS QA"
+        repo: "git@github.com:sibils/BioMoQA-RAG.git"
+        repo_version: "prod_5.1.5.10"
+        # repo_subdirectory: ""
+        static_file_dir: "{{ playbook_dir }}/files/playbook_prod_sibils_qa"
+        gpu: true
+        start_cmd: |
+          python3 -m uvicorn biomoqa_rag.api_server:app --host 0.0.0.0 --port 9000
+    - role: bitem.add_prometheus_target
+      delegate_to: monitoring.lan.text-analytics.ch
+      vars:
+        target: "{{ inventory_hostname }}:9000"
+        job_name: "backend"
+        service_name: "qa"
+        service_project: "SIBiLS"
+        service_environment: "prod"
+
+  post_tasks:
+    # Downloads on CPU with CUDA hidden. Pulling these into VRAM at this point caused
+    # the GPU OOM on startup that took a while to track down.
+    - name: Pre-download HuggingFace models for BioMoQA-RAG
+      ansible.builtin.shell: |
+        set -euo pipefail
+
+        unset PYTORCH_ALLOC_CONF
+        export CUDA_VISIBLE_DEVICES=""
+
+        /opt/sibils-qa/venv/bin/python3 <<'PY'
+        from sentence_transformers import SentenceTransformer, CrossEncoder
+
+        SentenceTransformer(
+            "pritamdeka/S-PubMedBert-MS-MARCO",
+            device="cpu",
+        )
+
+        CrossEncoder(
+            "cross-encoder/ms-marco-MiniLM-L-12-v2",
+            device="cpu",
+        )
+
+        print("Models downloaded and loaded on CPU")
+        PY
+      args:
+        executable: /bin/bash
+      environment:
+        HF_HUB_OFFLINE: "0"
+        HF_HOME: "/opt/sibils-qa/.cache/huggingface"
+      changed_when: false
+
+    - name: Restart sibils-qa after model download
+      ansible.builtin.systemd:
+        name: sibils-qa
+        state: restarted
+        daemon_reload: true

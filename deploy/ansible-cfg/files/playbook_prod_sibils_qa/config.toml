@@ -1,0 +1,97 @@
+# SIBiLS QA configuration — PRODUCTION (sibils-prod-ai)
+#
+# Goes in ansible-cfg as files/playbook_prod_sibils_qa/config.toml
+#
+# Identical to the dev config except the two [sibils] endpoints, which point at the
+# production services instead of the dev ones. Everything else is deliberately the same,
+# so prod behaves exactly like the dev instance it was cut from.
+
+[server]
+host = "0.0.0.0"
+port = 9000
+workers = 1  # Keep at 1 for GPU mode
+log_level = "info"
+
+[model]
+# Inference mode: "gpu", "gpu_small", or "cpu"
+mode = "gpu"
+
+# Pre-quantized FP8 model — required on A100 (compute cap 8.0).
+# Dynamic fp8 on base Qwen3-8B is broken on A100 with vLLM 0.19.0 (garbage output).
+# Pre-quantized weights use W8A16 Marlin path on A100 correctly. Same ~8GB footprint.
+model_name = "Qwen/Qwen3-8B-FP8"
+
+# Model size for CPU mode: "0.5b", "1.5b", "3b", "7b"
+size = "8b"
+
+# GPU settings
+gpu_memory_utilization = 0.83
+quantization = "fp8"  # or null to disable
+
+[generation]
+max_tokens = 300
+temperature = 0.2  # raised from 0.1 — greedy sampling causes degenerate repetition loops
+
+[retrieval]
+# Number of documents to retrieve initially
+retrieval_n = 10  # reduced from 30 — no reranker/filter to trim, BioBERT runs on all
+
+# Use smart hybrid retrieval (SIBILS + FAISS)
+use_smart_retrieval = true
+
+# Hybrid retrieval weight (0 = SIBILS only, 1 = FAISS only)
+hybrid_alpha = 0.0  # BM25 only — matches old sibils.org QA behaviour
+
+[sibils]
+# PRODUCTION endpoints. These two lines are the only difference from the dev config.
+# Both must be set explicitly: the built-in default for query_parser_api_url is the DEV
+# parser, so omitting it here would silently point production at dev.
+search_api_url = "https://biodiversitypmc.sibils.org/api/search"
+query_parser_api_url = "https://biodiversitypmc.sibils.org/api/query/parse"
+
+# Default collections to search (comma-separated): medline, plazi, pmc, suppdata
+collections = ["medline", "plazi", "pmc"]
+
+# HTTP User-Agent header for API requests
+user_agent = "BioMoQA-RAG/1.0 (https://github.com/sibils/BioMoQA-RAG)"
+
+# Disk cache for SIBILS responses (avoids repeated API calls for identical queries)
+cache_dir = "data/sibils_cache"
+cache_ttl = 604800  # 7 days in seconds
+
+# 0 = never cache an empty result. A transient upstream zero would otherwise be replayed
+# to every later request for the same query. This is also the code default, stated here
+# so it cannot drift silently.
+empty_cache_ttl = 0
+
+# Require a recognised binomial as an adjacent phrase, so a specific epithet alone cannot
+# match a different organism (Anurida polaris vs the stonefly Arcynopteryx polaris).
+enforce_taxon_phrase = true
+
+[reranking]
+enabled = false  # disabled — matches old sibils.org QA behaviour
+model = "cross-encoder/ms-marco-MiniLM-L-12-v2"
+top_k = 7
+
+[extraction]
+# BioBERT device: 0 = GPU, -1 = CPU. GPU cuts inference from ~0.8s to ~0.05s.
+# Set to -1 (CPU) to avoid CUDA OOM: vLLM holds 83% of GPU memory, leaving only ~3.4 GB
+# free. CrossEncoder was already moved to CPU for the same reason (commit a851656).
+device = -1
+
+[relevance_filter]
+enabled = false  # disabled — matches old sibils.org QA behaviour
+min_overlap = 0.15
+final_n = 5
+min_extractive_score = 0.20  # BioBERT confidence threshold; below this falls back to generative
+
+[context]
+max_abstract_length = 1500  # used by BioBERT extractive QA (needs full text for span extraction)
+llm_abstract_length = 600   # used by LLM generative prompt — keeps total prompt under max_model_len=4096
+                             # 8 docs × 600 chars × ~0.25 tok/char ≈ 1200 tokens, well within 4096
+truncate_abstracts = true
+
+[data]
+# Path to FAISS index and documents
+faiss_index = "data/faiss_index.bin"
+documents = "data/documents.pkl"
