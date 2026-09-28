@@ -50,7 +50,21 @@
         export CUDA_VISIBLE_DEVICES=""
 
         /opt/sibils-qa/venv/bin/python3 <<'PY'
+        from huggingface_hub import snapshot_download
         from sentence_transformers import SentenceTransformer, CrossEncoder
+
+        # The service runs with HF_HUB_OFFLINE=1, so every model it resolves through
+        # the Hub must already be in the cache or startup fails with
+        # LocalEntryNotFoundError. snapshot_download only fetches files, it does not
+        # load anything into memory, so the big generative model is safe to pull here.
+
+        # vLLM resolves this at startup via snapshot_download. Must match
+        # [model] model_name in config.toml.
+        snapshot_download(repo_id="Qwen/Qwen3-8B-FP8")
+
+        # BioBERT extractive QA. Lazy-loaded on first use, so a missing cache does not
+        # fail startup — it fails the first mode=extractive question instead.
+        snapshot_download(repo_id="ktrapeznikov/biobert_v1.1_pubmed_squad_v2")
 
         SentenceTransformer(
             "pritamdeka/S-PubMedBert-MS-MARCO",
