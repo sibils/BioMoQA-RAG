@@ -69,6 +69,7 @@ class RAGConfig:
 
     # Extractive QA (optional mode — lazy-loaded on first use)
     qa_model: str = "ktrapeznikov/biobert_v1.1_pubmed_squad_v2"
+    dense_model: str = "pritamdeka/S-PubMedBert-MS-MARCO"
     qa_confidence_threshold: float = 0.01  # Lowered from 0.1 — BioBERT is conservative
     qa_device: int = 0  # 0 = GPU, -1 = CPU
 
@@ -158,7 +159,7 @@ class RAGPipeline:
         print("✓ Using SIBILS BM25 retriever (extractive)")
 
         # ── RAG retriever (for generative mode): FAISS + BM25 + reranker ─
-        self.dense = DenseRetriever(model_name="pritamdeka/S-PubMedBert-MS-MARCO")
+        self.dense = DenseRetriever(model_name=self.config.dense_model)
         self.dense.load("data/faiss_index.bin", "data/documents.pkl")
         self.rag_retriever = SmartHybridRetriever(
             self.sibils, self.dense, alpha=0.5, k=60

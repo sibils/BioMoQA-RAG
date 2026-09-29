@@ -43,6 +43,8 @@ class RetrievalConfig(BaseModel):
     retrieval_n: int = 15
     use_smart_retrieval: bool = True
     hybrid_alpha: float = 0.5
+    # Dense retriever encoder, used by the hybrid (generative) path.
+    dense_model: str = "pritamdeka/S-PubMedBert-MS-MARCO"
 
 
 class SibilsConfig(BaseModel):
@@ -82,6 +84,8 @@ class DataConfig(BaseModel):
 
 class ExtractionConfig(BaseModel):
     device: int = 0  # 0 = GPU, -1 = CPU
+    # BioBERT extractive QA model. Lazy-loaded on first extractive question.
+    model: str = "ktrapeznikov/biobert_v1.1_pubmed_squad_v2"
 
 
 class Config(BaseModel):
@@ -111,3 +115,35 @@ def get_config(config_path: Optional[str] = None) -> Config:
             raw = tomllib.load(f)
         _config = Config(**raw)
     return _config
+
+
+def required_models(config: Optional[Config] = None) -> List[str]:
+    """Every HuggingFace repo id the running service resolves through the Hub.
+
+    The service runs with HF_HUB_OFFLINE=1 and downloads nothing, so the deployment
+    must pre-populate the cache with exactly this list. Deriving it from the config
+    rather than restating it in the playbook is what stops the two drifting apart:
+    a model changed in config.toml is downloaded on the next deploy without anyone
+    having to remember a second place to edit.
+
+    The reranker is included whether or not reranking is enabled, because the
+    pipeline loads it at construction time regardless, and an unused 1 GB download
+    is cheaper than a failed deploy.
+    """
+    cfg = config or get_config()
+    models = [
+        cfg.model.model_name,
+        cfg.reranking.model,
+        cfg.extraction.model,
+        cfg.retrieval.dense_model,
+    ]
+    return list(dict.fromkeys(m for m in models if m))
+
+
+def print_required_models() -> None:
+    """Entry point: print one HuggingFace repo id per line, for the deploy playbook."""
+    import sys
+
+    path = sys.argv[1] if len(sys.argv) > 1 else None
+    for model in required_models(get_config(path) if path else None):
+        print(model)

@@ -36,6 +36,9 @@ use_smart_retrieval = true
 # Hybrid retrieval weight (0 = SIBILS only, 1 = FAISS only)
 hybrid_alpha = 0.0  # BM25 only — matches old sibils.org QA behaviour
 
+# Dense retriever encoder (hybrid/generative path)
+dense_model = "pritamdeka/S-PubMedBert-MS-MARCO"
+
 [sibils]
 # SIBILS search API endpoint
 search_api_url = "https://biodiversitypmc.sibils.org/api/search"
@@ -63,6 +66,9 @@ top_k = 7
 # Set to -1 (CPU) to avoid CUDA OOM: vLLM holds 83% of GPU memory, leaving only ~3.4 GB
 # free. CrossEncoder was already moved to CPU for the same reason (commit a851656).
 device = -1
+
+# BioBERT extractive QA model
+model = "ktrapeznikov/biobert_v1.1_pubmed_squad_v2"
 
 [relevance_filter]
 enabled = false  # disabled — matches old sibils.org QA behaviour

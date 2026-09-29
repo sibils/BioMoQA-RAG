@@ -75,6 +75,7 @@ Issues = "https://github.com/sibils/BioMoQA-RAG/issues"
 
 [project.scripts]
 biomoqa-api = "biomoqa_rag.api_server:main"
+biomoqa-models = "biomoqa_rag.config:print_required_models"
 
 [tool.black]
 line-length = 120

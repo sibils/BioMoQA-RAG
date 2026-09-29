@@ -42,47 +42,44 @@
   post_tasks:
     # Downloads on CPU with CUDA hidden. Pulling these into VRAM at this point caused
     # the GPU OOM on startup that took a while to track down.
-    - name: Pre-download HuggingFace models for BioMoQA-RAG
+    # Downloads on CPU with CUDA hidden. Pulling these into VRAM at this point caused
+    # the GPU OOM on startup that took a while to track down.
+    #
+    # The model list is not written here on purpose. `biomoqa-models` prints exactly
+    # what the installed app resolves from its own config.toml, so a model changed in
+    # config.toml is downloaded on the next deploy with no second place to remember.
+    # Hardcoding the list here is what let Qwen3-8B-FP8 go missing and take the
+    # service down on a host with a cold cache.
+    - name: Pre-download every model this config requires
       ansible.builtin.shell: |
         set -euo pipefail
 
         unset PYTORCH_ALLOC_CONF
         export CUDA_VISIBLE_DEVICES=""
 
-        /opt/sibils-qa/venv/bin/python3 <<'PY'
+        cd /opt/sibils-qa    # biomoqa-models reads ./config.toml
+
+        /opt/sibils-qa/venv/bin/biomoqa-models | while read -r model; do
+          [ -n "$model" ] || continue
+          echo "pre-downloading ${model}"
+          /opt/sibils-qa/venv/bin/python3 - "$model" <<'PY'
+        import sys
         from huggingface_hub import snapshot_download
-        from sentence_transformers import SentenceTransformer, CrossEncoder
-
-        # The service runs with HF_HUB_OFFLINE=1, so every model it resolves through
-        # the Hub must already be in the cache or startup fails with
-        # LocalEntryNotFoundError. snapshot_download only fetches files, it does not
-        # load anything into memory, so the big generative model is safe to pull here.
-
-        # vLLM resolves this at startup via snapshot_download. Must match
-        # [model] model_name in config.toml.
-        snapshot_download(repo_id="Qwen/Qwen3-8B-FP8")
-
-        # BioBERT extractive QA. Lazy-loaded on first use, so a missing cache does not
-        # fail startup — it fails the first mode=extractive question instead.
-        snapshot_download(repo_id="ktrapeznikov/biobert_v1.1_pubmed_squad_v2")
-
-        SentenceTransformer(
-            "pritamdeka/S-PubMedBert-MS-MARCO",
-            device="cpu",
-        )
-
-        CrossEncoder(
-            "cross-encoder/ms-marco-MiniLM-L-12-v2",
-            device="cpu",
-        )
-
-        print("Models downloaded and loaded on CPU")
+        snapshot_download(repo_id=sys.argv[1])
         PY
+        done
       args:
         executable: /bin/bash
+      # As the service user, into the cache the service actually reads. The role points
+      # the service at /var/cache/sibils-qa/huggingface (a systemd CacheDirectory); the
+      # old /opt/sibils-qa/.cache/huggingface here was a second, unused cache, so this
+      # task reported success while the service still found nothing. Verify with:
+      #   systemctl show sibils-qa -p Environment | tr ' ' '\n' | grep '^HF_'
+      become: true
+      become_user: sibils-qa
       environment:
         HF_HUB_OFFLINE: "0"
-        HF_HOME: "/opt/sibils-qa/.cache/huggingface"
+        HF_HOME: "/var/cache/sibils-qa/huggingface"
       changed_when: false
 
     - name: Restart sibils-qa after model download
