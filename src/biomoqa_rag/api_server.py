@@ -495,6 +495,14 @@ class MultiQAResponse(BaseModel):
         None,
         description="Total wall-clock time for the full pipeline in seconds.",
     )
+    error: Optional[str] = Field(
+        None,
+        description=(
+            "Set when the pipeline failed. An empty `collection_results` with no `error` "
+            "means the question genuinely retrieved nothing; with an `error` it means the "
+            "request failed and the result is not an answer."
+        ),
+    )
     unresolved_refs: Optional[List[str]] = Field(
         None,
         description=(
@@ -862,6 +870,9 @@ def answer_question_post(request: QuestionRequest):
         return MultiQAResponse(**result)
     except Exception as e:
         logger.exception("Pipeline error in /qa")
+        # Report the failure. Returning an empty result with no error made a broken
+        # request indistinguishable from a question with no matching literature, which
+        # is how 102 deterministic failures went unexplained in the D10.3 evaluation.
         return MultiQAResponse(
             question=request.question,
             collection_results=[],
@@ -869,6 +880,7 @@ def answer_question_post(request: QuestionRequest):
             ndocs_retrieved=0,
             model="",
             pipeline_time=None,
+            error=f"{type(e).__name__}: {e}",
         )
 
 

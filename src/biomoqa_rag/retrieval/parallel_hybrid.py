@@ -55,9 +55,14 @@ class ParallelHybridRetriever:
         if collection is not None:
             allowed = set(collection) if isinstance(collection, list) else {collection}
 
-        # Add dense scores — skip FAISS docs not in the requested collection
+        # Add dense scores. The local FAISS index is not organised by SIBILS
+        # collection and its documents carry no source, so filtering them against the
+        # requested collections discarded every one of them and silently reduced the
+        # hybrid to BM25-only. Only drop a dense hit when it declares a source that
+        # was not asked for.
         for rank, doc in enumerate(dense_results, start=1):
-            if allowed and getattr(doc, 'source', None) not in allowed:
+            source = getattr(doc, 'source', None)
+            if allowed and source is not None and source not in allowed:
                 continue
             key = getattr(doc, 'doc_id', None) or getattr(doc, 'pmcid', None)
             score = self.alpha / (self.k + rank)
@@ -131,8 +136,11 @@ class ParallelHybridRetriever:
             raise RuntimeError(f"Both retrievers failed: {errors}")
 
         if not bm25_results:
-            # Dense only
-            return dense_results[:top_k]
+            # Dense only. Route through RRF rather than returning raw hits so the
+            # collection filter and rrf_score assignment still apply; returning the
+            # unfiltered list here handed the pipeline documents from the offline
+            # index with no source and no doc_id.
+            return self.reciprocal_rank_fusion([], dense_results, collection)[:top_k]
 
         if not dense_results:
             # BM25 only

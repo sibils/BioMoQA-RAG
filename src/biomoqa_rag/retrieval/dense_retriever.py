@@ -152,7 +152,7 @@ class DenseRetriever:
                 pmcid=d['pmcid'],
                 title=d['title'],
                 abstract=d['abstract'],
-                source=d.get('source', 'unknown'),
+                source=d.get('source') or 'faiss',
                 pmid=d.get('pmid'),
             ) for d in docs_dict
         ]
