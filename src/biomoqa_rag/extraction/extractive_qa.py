@@ -1,13 +1,23 @@
 """
 Extractive QA module using BioBERT fine-tuned on SQuAD2.
 
-Single-pass strategy matching the original sibils.org QA behaviour:
-one forward pass per document on the first 512 tokens, no sliding window.
+A document of up to 8,000 characters (a Plazi treatment, an abstract) is read whole; a
+longer one (PMC full text) is cut to its most relevant passage with the same anchored
+selection the generative reader uses. The text is read in overlapping 512-token windows.
+Before, one forward pass read the first 512 tokens of a 2,000-character window, so
+about 1,500 characters were read and the rest was silently truncated: in the KYBELE
+D10.3 evaluation a body size was found 96 % of the time before 1,500 characters and
+33 % of the time after.
 """
 
 from typing import List, Dict
 
-_CONTEXT_LEN = 2000
+from ..passage import best_passage
+
+_READ_WHOLE_UPTO = 8000   # documents up to this many characters are read whole
+_CONTEXT_LEN = 4000       # otherwise, the anchored passage of this many characters
+_MAX_SEQ_LEN = 512        # BioBERT's limit, question included
+_DOC_STRIDE = 128         # token overlap between consecutive windows
 _MAX_ANSWER_TOKENS = 30
 
 
@@ -15,8 +25,8 @@ class BioExtractiveQA:
     """
     Extractive QA using a BERT-style model trained on SQuAD2.
 
-    Single-pass strategy: one BioBERT forward pass per document on the
-    first 2000 chars (~500 tokens). Matches original sibils.org QA behaviour.
+    One batched forward pass per document over the overlapping windows of its
+    passage; the best span over all windows is the document's answer.
     """
 
     def __init__(
@@ -43,76 +53,62 @@ class BioExtractiveQA:
         enc = self.tokenizer(
             question,
             context,
-            max_length=512,
-            truncation=True,
-            padding=False,
-            return_tensors="pt",
+            max_length=_MAX_SEQ_LEN,
+            truncation="only_second",
+            stride=_DOC_STRIDE,
+            return_overflowing_tokens=True,
             return_offsets_mapping=True,
+            padding=True,
+            return_tensors="pt",
         )
-        offsets = enc.pop("offset_mapping")[0]
-        enc = {k: v.to(self.torch_device) for k, v in enc.items()}
-        token_type_ids = enc.get("token_type_ids")
+        offsets_all = enc.pop("offset_mapping")
+        enc.pop("overflow_to_sample_mapping", None)
+        n_windows = offsets_all.shape[0]
+        # Context tokens only (sequence id 1): the span must not be in the question,
+        # in a special token or in padding.
+        ctx_masks = [
+            torch.tensor([sid == 1 for sid in enc.sequence_ids(w)], dtype=torch.bool)
+            for w in range(n_windows)
+        ]
+        inputs = {k: v.to(self.torch_device) for k, v in enc.items()}
         with torch.no_grad():
-            out = self.model(**enc)
+            out = self.model(**inputs)
 
-        start_logits = out.start_logits[0]
-        end_logits = out.end_logits[0]
+        best = {"answer": "", "score": 0.0, "start": 0, "end": 0}
+        for w in range(n_windows):
+            mask = ctx_masks[w].to(out.start_logits.device)
+            if not bool(mask.any()):
+                continue
+            # The [CLS] position is SQuAD2's "no answer". Keeping it in the normalisation
+            # means a window that does not contain the answer gives its spans little
+            # probability, so spans from different windows can be compared.
+            norm = mask.clone()
+            norm[0] = True
+            start_probs = F.softmax(out.start_logits[w].masked_fill(~norm, float("-inf")), dim=-1)
+            end_probs = F.softmax(out.end_logits[w].masked_fill(~norm, float("-inf")), dim=-1)
+            start_probs = start_probs.masked_fill(~mask, 0.0)
+            end_probs = end_probs.masked_fill(~mask, 0.0)
 
-        # Mask question tokens (token_type_id == 0) so the span must be in the context.
-        if token_type_ids is not None:
-            ctx_mask = token_type_ids[0].bool()
-            start_logits = start_logits.masked_fill(~ctx_mask, float("-inf"))
-            end_logits = end_logits.masked_fill(~ctx_mask, float("-inf"))
-
-        start_probs = F.softmax(start_logits, dim=-1)
-        end_probs = F.softmax(end_logits, dim=-1)
-
-        # Best valid span: end >= start, max span _MAX_ANSWER_TOKENS tokens.
-        n = len(start_logits)
-        score_matrix = start_probs.unsqueeze(1) * end_probs.unsqueeze(0)  # [n, n]
-        for i in range(n):
-            lo = max(0, i - _MAX_ANSWER_TOKENS)
-            score_matrix[i, :lo] = 0.0
-            score_matrix[i, :i] = 0.0
-
-        flat = score_matrix.view(-1).argmax().item()
-        best_start = flat // n
-        best_end = flat % n
-        best_score = score_matrix[best_start, best_end].item()
-
-        start_char = offsets[best_start][0].item()
-        end_char = offsets[best_end][1].item()
-        answer = context[start_char:end_char].strip()
-
-        return {"answer": answer, "score": best_score, "start": start_char, "end": end_char}
+            # Best valid span: end >= start, at most _MAX_ANSWER_TOKENS tokens.
+            n = len(start_probs)
+            score_matrix = torch.triu(start_probs.unsqueeze(1) * end_probs.unsqueeze(0))
+            score_matrix = torch.tril(score_matrix, diagonal=_MAX_ANSWER_TOKENS)
+            flat = score_matrix.view(-1).argmax().item()
+            s_tok, e_tok = flat // n, flat % n
+            score = score_matrix[s_tok, e_tok].item()
+            if score <= best["score"]:
+                continue
+            start_char = offsets_all[w][s_tok][0].item()
+            end_char = offsets_all[w][e_tok][1].item()
+            answer = context[start_char:end_char].strip()
+            if answer:
+                best = {"answer": answer, "score": score, "start": start_char, "end": end_char}
+        return best
 
     @staticmethod
     def _best_passage(text: str, question: str, window: int) -> str:
-        """IDF-weighted window scan — same logic as RAGPipeline._best_passage."""
-        if len(text) <= window:
-            return text
-        import re
-        stop = {
-            'what', 'is', 'the', 'are', 'of', 'in', 'a', 'an', 'and', 'or',
-            'for', 'to', 'does', 'how', 'why', 'which', 'do', 'its', 'by',
-        }
-        words = {w for w in re.findall(r'\w+', question.lower()) if len(w) > 2 and w not in stop}
-        if not words:
-            return text[:window]
-        tl = text.lower()
-        weights = {w: 1.0 / (tl.count(w) + 1) for w in words}
-        step = max(1, window // 8)
-        best_score, best_pos = -1.0, 0
-        for pos in range(0, len(text) - window + 1, step):
-            chunk = tl[pos:pos + window]
-            score = 0.0
-            for w in words:
-                idx = chunk.find(w)
-                if idx >= 0:
-                    score += weights[w] * (1.0 - 0.5 * idx / window)
-            if score > best_score:
-                best_score, best_pos = score, pos
-        return text[best_pos:best_pos + window]
+        """The anchored passage selection the generative reader uses (passage.best_passage)."""
+        return best_passage(text, question, window)
 
     def extract(self, question: str, documents: List, max_context_length: int = 800) -> List[Dict]:
         """
@@ -125,7 +121,8 @@ class BioExtractiveQA:
             + (doc.full_text or doc.abstract or "")
             for doc in documents
         ]
-        valid = [(i, self._best_passage(ctx, question, _CONTEXT_LEN))
+        valid = [(i, ctx if len(ctx) <= _READ_WHOLE_UPTO
+                  else self._best_passage(ctx, question, _CONTEXT_LEN))
                  for i, ctx in enumerate(full_contexts) if ctx.strip()]
         if not valid:
             return []

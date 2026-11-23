@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import requests
 
 from .query_parser import SIBILSQueryParser, ParsedQuery
+from ..passage import mentions
 
 
 @dataclass
@@ -371,6 +372,11 @@ class SIBILSRetriever:
             if self.use_es_query and parsed_query.success and parsed_query.es_query:
                 use_es_mode = True
 
+        # Binomials the parser recognised (OTT-annotated), required in every path.
+        taxa = []
+        if self.enforce_taxon_phrase and parsed_query and parsed_query.success and parsed_query.es_query:
+            taxa = self._extract_taxa(parsed_query.es_query)
+
         try:
             docs = None
 
@@ -381,12 +387,10 @@ class SIBILSRetriever:
                 if collection == "medline":
                     # Exclude title-only citations (empty abstract) at the source.
                     es_query = self._with_abstract_filter(es_query)
-                if self.enforce_taxon_phrase:
+                if taxa:
                     # Require a recognised binomial as a phrase so the specific
                     # epithet alone cannot match a different organism.
-                    taxa = self._extract_taxa(parsed_query.es_query)
-                    if taxa:
-                        es_query = self._with_taxon_phrase(es_query, taxa, collection)
+                    es_query = self._with_taxon_phrase(es_query, taxa, collection)
                 response = requests.post(
                     self.api_url,
                     params={"col": collection, "n": n},
@@ -420,6 +424,13 @@ class SIBILSRetriever:
                     raise Exception(f"SIBILS API error: {error}")
 
                 docs = self._parse_hits(data, collection)
+                if taxa:
+                    # The keyword GET has no ES filter, so the binomial is enforced here:
+                    # without it the fallback matched the epithet alone, and every wrong
+                    # end-to-end body size in D10.3 came from another taxon's document (P3).
+                    docs = [d for d in docs
+                            if any(mentions(f"{d.title or ''} {d.abstract or ''} {d.full_text or ''}", name)
+                                   for name, _ in taxa)]
 
             return docs
 
