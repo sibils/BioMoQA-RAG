@@ -33,6 +33,29 @@ from .retrieval.dense_retriever import DenseRetriever
 from .retrieval.parallel_hybrid import ParallelHybridRetriever, SmartHybridRetriever
 from .retrieval.reranker import SemanticReranker
 from .retrieval.relevance_filter import FastRelevanceFilter
+from .passage import best_passage
+from .answer_signals import annotate, mean_token_probability, rank_collection_results
+
+
+class GeneratedText(str):
+    """Generated text that also carries the generation's mean token probability.
+
+    A str, so every caller of _generate_vllm keeps working unchanged; the answer
+    builder reads `.confidence` when it is there.
+    """
+    confidence = None
+
+    def __new__(cls, text: str, confidence=None):
+        obj = super().__new__(cls, text)
+        obj.confidence = confidence
+        return obj
+
+
+# Habitat questions: the reader is asked for the environment, not the collection localities.
+import re as _re
+_HABITAT_Q = _re.compile(
+    r"\bhabitats?\b|\bwhere (?:does|do|is|are|can)\b.*\b(?:live|found|occur|inhabit)\w*"
+    r"|\binhabit\w*\b|\becolog\w*\b", _re.I)
 
 
 @dataclass
@@ -414,6 +437,7 @@ class RAGPipeline:
         clean_text = re.sub(r'\[\d+(?:\s*,\s*\d+)*\]', '', text).strip()
         if self._is_garbage(clean_text):
             return []
+        passages = self._passages(question, documents)
         # Parse cited [N] indices to surface all referenced documents.
         # If none cited, fall back to top document.
         cited_indices = sorted(set(
@@ -423,9 +447,10 @@ class RAGPipeline:
         if not cited_indices:
             cited_indices = [0]
         # Return one item: the full answer text with all cited docs in the docs list.
-        return [{
+        return [annotate({
             "answer": clean_text,
             "answer_score": None,
+            "generation_confidence": getattr(raw_text, "confidence", None),
             "docs": [
                 {
                     "docid": self._format_docid(documents[i]),
@@ -437,10 +462,13 @@ class RAGPipeline:
                     )[:800],
                     "snippet_start": None,
                     "snippet_end": None,
+                    # The passage of the document the model was given, which is what the
+                    # answer can rest on; doc_text is only the start of the abstract.
+                    "passage": passages[i],
                 }
                 for i in cited_indices
             ],
-        }]
+        })]
 
     def _build_answer_from_candidate(self, cand: dict, documents: List) -> dict:
         """Build an answer dict from an extractive QA candidate."""
@@ -461,6 +489,7 @@ class RAGPipeline:
                 "doc_text": snippet,
                 "snippet_start": s - window_start,
                 "snippet_end": e - window_start,
+                "passage": passage,
             }],
         }
 
@@ -641,10 +670,11 @@ class RAGPipeline:
                 entry['debug_info'] = col_debug
             qa_results.append(entry)
 
-        # ── 4. Add rank numbers ───────────────────────────────────────────
-        collection_results = [
-            {**entry, "rank": i + 1} for i, entry in enumerate(qa_results)
-        ]
+        # ── 4. Rank collections by their answers ──────────────────────────
+        # Retrieval scores are not comparable across collections, and a collection
+        # whose answer is "the sources do not state it" should not be listed above
+        # one that answers (D10.3 P2). Retrieval order breaks the remaining ties.
+        collection_results = rank_collection_results(question, qa_results, use_scores=False)
 
         return {
             "question": question,
@@ -891,64 +921,16 @@ class RAGPipeline:
 
     @staticmethod
     def _best_passage(text: str, question: str, window: int) -> str:
-        """Return the `window`-char slice of text with the highest IDF-weighted keyword score.
+        """Anchored passage selection, shared with the extractive reader (passage.best_passage)."""
+        return best_passage(text, question, window)
 
-        For short texts (abstracts) this is a no-op. For PMC full-text documents the
-        relevant measurement/description section is often buried thousands of chars in,
-        so we slide the window to find it rather than blindly taking the first N chars.
-
-        Uses IDF-style weighting (1/freq) so rare terms like "body" outweigh ubiquitous
-        terms like "zeuxevania" that appear dozens of times throughout the document.
-        """
-        if len(text) <= window:
-            return text
-        import re
-        stop = {
-            'what', 'is', 'the', 'are', 'of', 'in', 'a', 'an', 'and', 'or',
-            'for', 'to', 'does', 'how', 'why', 'which', 'do', 'its', 'by',
-        }
-        words = {w for w in re.findall(r'\w+', question.lower()) if len(w) > 2 and w not in stop}
-        if not words:
-            return text[:window]
-        tl = text.lower()
-        # IDF weight: rarer in the document → higher weight → more discriminative
-        weights = {w: 1.0 / (tl.count(w) + 1) for w in words}
-
-        # The rarest term present is what makes a window on-topic: a species epithet
-        # inside a genus revision, say. A window that misses it is describing
-        # something else, however many common terms it happens to contain. Without
-        # this, a comparison table's "Body length" header outranks the single row
-        # naming the species actually being asked about.
-        present = {w: tl.count(w) for w in words if tl.count(w) > 0}
-        anchors = []
-        if present:
-            rarest = min(present.values())
-            if rarest <= 3:
-                anchors = [w for w, c in present.items() if c == rarest]
-
-        step = max(1, window // 8)  # finer step for better placement
-        best_score, best_pos = -1.0, 0
-        best_anchored_score, best_anchored_pos = -1.0, None
-        for pos in range(0, len(text) - window + 1, step):
-            chunk = tl[pos:pos + window]
-            score = 0.0
-            for w in words:
-                idx = chunk.find(w)
-                if idx >= 0:
-                    # Prefer windows where high-weight keywords appear early —
-                    # keyword at window start scores full weight, at end scores half.
-                    # This keeps the answer within BioBERT's 512-token budget.
-                    score += weights[w] * (1.0 - 0.5 * idx / window)
-            if score > best_score:
-                best_score, best_pos = score, pos
-            if anchors and any(a in chunk for a in anchors) and score > best_anchored_score:
-                best_anchored_score, best_anchored_pos = score, pos
-
-        # An anchored window always wins over a higher-scoring window that omits
-        # every discriminative term.
-        if best_anchored_pos is not None:
-            best_pos = best_anchored_pos
-        return text[best_pos:best_pos + window]
+    def _passages(self, question: str, documents: List) -> List[str]:
+        """The passage of each document the generative model is given, cleaned."""
+        llm_limit = self.config.llm_abstract_length
+        return [
+            self._clean_for_llm(self._best_passage(doc.full_text or doc.abstract or '', question, llm_limit))
+            for doc in documents
+        ]
 
     def _build_messages(self, question: str, documents: List) -> List[dict]:
         """Build chat messages for the LLM from question and retrieved documents.
@@ -966,23 +948,33 @@ class RAGPipeline:
         disabling chain-of-thought reasoning at the tokenizer/template level.
         This works regardless of vLLM version, unlike chat_template_kwargs.
         """
-        llm_limit = self.config.llm_abstract_length
+        passages = self._passages(question, documents)
         context_parts = []
         for i, doc in enumerate(documents):
-            raw = doc.full_text or doc.abstract or ''
-            passage = self._best_passage(raw, question, llm_limit)
-            text = self._clean_for_llm(passage)
             title = self._clean_for_llm(doc.title or '')
-            context_parts.append(f"[{i}] {title}\n{text}")
+            context_parts.append(f"[{i}] {title}\n{passages[i]}")
 
         context = "\n\n".join(context_parts)
+        # D10.3 P4: in 14 of 25 body-size cases answered "not stated", the value was in
+        # the passage the model was given. D10.3 P6: habitat answers listed collection
+        # localities and countries as if they were habitats.
         system = (
             "You are a biomedical expert assistant. Answer the question based ONLY "
             "on the provided scientific sources. Be concise and factual (2-4 sentences). "
             "Cite sources using [0], [1], etc. after each claim. "
-            "If the sources lack sufficient information, say so briefly. "
+            "When a source states the requested value, such as a measurement with its "
+            "units, give it as the source states it and name the organism it refers to. "
+            "Say the sources lack the information only if none of them contains it, "
+            "and then say so briefly. "
             "Always respond in English only."
         )
+        if _HABITAT_Q.search(question or ""):
+            system += (
+                " For a habitat question, describe the environment and substrate "
+                "(for example soil, leaf litter, moss, dead wood, caves, forest, grassland, "
+                "seashore), not the countries, regions or localities where specimens "
+                "were collected."
+            )
         return [
             {"role": "system", "content": system},
             {"role": "user", "content": f"Sources:\n{context}\n\nQuestion: {question}"},
@@ -1004,6 +996,7 @@ class RAGPipeline:
             min_p=0.05,
             repetition_penalty=1.15,
             stop=["\nQuestion:", "\nNote:", "\nReferences:", "\nSources:"],
+            logprobs=1,   # the sampled token's log-probability, for generation_confidence
         )
 
         # Pre-fill the assistant turn so the model continues an English sentence.
@@ -1021,8 +1014,22 @@ class RAGPipeline:
                 continue_final_message=True,
                 add_generation_prompt=False,
             )
-        continuation = outputs[0].outputs[0].text.strip()
-        return ENGLISH_PREFIX + continuation
+        completion = outputs[0].outputs[0]
+        continuation = completion.text.strip()
+        return GeneratedText(ENGLISH_PREFIX + continuation, self._confidence(completion))
+
+    @staticmethod
+    def _confidence(completion) -> Optional[float]:
+        """Mean probability of the generated tokens (geometric), or None."""
+        try:
+            lps = []
+            for tok, entry in zip(completion.token_ids, completion.logprobs or []):
+                lp = entry.get(tok) if isinstance(entry, dict) else None
+                if lp is not None:
+                    lps.append(getattr(lp, "logprob", lp))
+            return mean_token_probability(lps)
+        except Exception:
+            return None
 
     def _generate_cpu(self, messages: List[dict]) -> str:
         """Generate with transformers (CPU)"""

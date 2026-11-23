@@ -403,6 +403,14 @@ class DocItem(BaseModel):
         None,
         description="Character offset of the answer span end within `doc_text`. Extractive mode only.",
     )
+    passage: Optional[str] = Field(
+        None,
+        description=(
+            "The passage of this document the reader was given: what the answer can rest on. "
+            "For full-text documents it is a window chosen around the question's terms, not "
+            "the start of the document."
+        ),
+    )
 
 
 class AnswerItem(BaseModel):
@@ -424,6 +432,24 @@ class AnswerItem(BaseModel):
             "Only present in extractive mode; `null` for generative answers."
         ),
     )
+    generation_confidence: Optional[float] = Field(
+        None,
+        description=(
+            "Generative mode: geometric mean of the generated tokens' probabilities, between "
+            "0 and 1. A rough signal, not calibrated, and not comparable with `answer_score`."
+        ),
+    )
+    hedged: Optional[bool] = Field(
+        None,
+        description=(
+            "Generative mode: the answer commits only partly (\"may\", \"possibly\", "
+            "\"suggests\"). Hedged answers are wrong more often than plain ones."
+        ),
+    )
+    states_no_answer: Optional[bool] = Field(
+        None,
+        description="Generative mode: the answer says the sources do not contain what was asked.",
+    )
     docs: List[DocItem] = Field(
         default_factory=list,
         description=(
@@ -444,8 +470,11 @@ class CollectionResult(BaseModel):
     rank: int = Field(
         ...,
         description=(
-            "Relevance rank of this collection for the question (1 = best match). "
-            "Rank is determined by the score of the top retrieved document."
+            "Rank of this collection for the question (1 = best). A collection whose answer "
+            "answers ranks above one whose answer says the sources do not state it; for a "
+            "question naming a species, Plazi ranks first among those; then plain answers "
+            "rank above hedged ones. Remaining ties keep retrieval order (with `doc_refs`: "
+            "the answer's score)."
         ),
     )
     answers: List[AnswerItem] = Field(
@@ -721,7 +750,7 @@ def _run_doc_refs_qa(
         by_col[doc.source].append(doc)
 
     collection_results = []
-    for rank, (col, col_docs) in enumerate(sorted(by_col.items()), start=1):
+    for col, col_docs in sorted(by_col.items()):
         result = p.run_with_documents(
             question=question,
             documents=col_docs,
@@ -731,11 +760,14 @@ def _run_doc_refs_qa(
         )
         collection_results.append({
             "collection": col,
-            "rank": rank,
             "answers": result.get("answers", []),
             "mode_used": result.get("mode_used"),
             "debug_info": result.get("debug_info") if debug else None,
         })
+    # Rank by the answers, not alphabetically: with sorted() Medline came first whenever
+    # present, and its "not stated" displaced the value a Plazi treatment gave (D10.3 P19).
+    from .answer_signals import rank_collection_results
+    collection_results = rank_collection_results(question, collection_results, use_scores=True)
 
     model_name = (
         "biobert" if mode == "extractive"
