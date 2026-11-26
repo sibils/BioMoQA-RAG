@@ -252,10 +252,14 @@ Tests: `uv pip install pytest pytest-cov`, then `python -m pytest`.
 Managed via Ansible/Jenkins (`bitem-heg-geneve/ansible-cfg`): branch `master` goes to dev,
 `prod_5.1.5.10` to production. The service runs as `sibils-qa.service`.
 
-HuggingFace models are pre-downloaded to `/opt/sibils-qa/.cache/huggingface/` during deploy
-(`biomoqa-models config.toml` prints the list). With `generation.backend = "remote"` no
-generative model is downloaded or loaded, and the host must reach the shared language-model
-server.
+The models are installed by ansible-cfg as pinned artifacts (`bitem.artifacts`, ansible-cfg
+PR 143), linked as `/opt/sibils-qa/artifacts/<name>`, and `config.toml` there loads each one
+from its folder: the service downloads nothing. With `generation.backend = "remote"` it loads
+only the reranker and BioBERT, and the host must reach the shared language-model server.
+
+The `config.toml` deployed to the server is the one in ansible-cfg
+(`files/playbook_dev_sibils_qa/config.toml`); the one in this repository is for local runs and
+lists every setting with its default.
 
 ---
 

@@ -88,12 +88,10 @@ Qwen3-8B-FP8 is ~8 GB of weights plus ~144 KB/token of KV cache. At
 VM has a smaller partition than the working host, vLLM will OOM at startup and that is the
 first thing to check.
 
-Two settings exist because of past GPU OOM incidents — leave them alone:
+One setting exists because of a past GPU OOM incident — leave it alone:
 
 - `[extraction] device = -1` puts BioBERT on CPU. vLLM holds 83% of the GPU; putting BioBERT
   on it too causes CUDA OOM.
-- The playbook's `post_tasks` pre-download HuggingFace models with `CUDA_VISIBLE_DEVICES=""`
-  and `PYTORCH_ALLOC_CONF` unset. Pulling them into VRAM there caused an OOM at startup.
 
 If the GPU turns out to be partitioned with MIG, the systemd unit needs
 `CUDA_VISIBLE_DEVICES=MIG-<uuid>` (from `nvidia-smi -L`). Without it, CUDA 12 maps `cuda:0`

@@ -139,33 +139,3 @@ def get_config(config_path: Optional[str] = None) -> Config:
             raw = tomllib.load(f)
         _config = Config(**raw)
     return _config
-
-
-def required_models(config: Optional[Config] = None) -> List[str]:
-    """Every HuggingFace repo id the running service resolves through the Hub.
-
-    The service runs with HF_HUB_OFFLINE=1 and downloads nothing, so the deployment
-    must pre-populate the cache with exactly this list. Deriving it from the config
-    rather than restating it in the playbook is what stops the two drifting apart:
-    a model changed in config.toml is downloaded on the next deploy without anyone
-    having to remember a second place to edit.
-
-    The generative model is included only when this process loads it (backend
-    "vllm" or "cpu"); with the shared server it is not needed here.
-    """
-    cfg = config or get_config()
-    models = [
-        cfg.model.model_name if cfg.generation.backend != "remote" else None,
-        cfg.reranking.model,
-        cfg.extraction.model,
-    ]
-    return list(dict.fromkeys(m for m in models if m))
-
-
-def print_required_models() -> None:
-    """Entry point: print one HuggingFace repo id per line, for the deploy playbook."""
-    import sys
-
-    path = sys.argv[1] if len(sys.argv) > 1 else None
-    for model in required_models(get_config(path) if path else None):
-        print(model)

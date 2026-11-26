@@ -11,9 +11,9 @@
 Each playbook ships its `config.toml` through the role's `static_file_dir`, from
 `files/<playbook name>/config.toml` in that repo. Jenkins runs the playbooks.
 
-`ansible-cfg/` in this directory is a **read-only mirror** of the prod files, kept here so
-the config that production runs is reviewable next to the code it configures. Editing it
-changes nothing. Copy changes into ansible-cfg and deploy from there.
+The models are pinned artifacts there (`bitem.artifacts`, ansible-cfg PR 143); the service
+downloads nothing. The mirror of the prod files that this directory used to hold is gone:
+read them in ansible-cfg.
 
 This directory previously held a second, hand-rolled Ansible setup (uv, `/opt/biomoqa`)
 that was never used and had drifted from reality. It has been removed rather than left to
