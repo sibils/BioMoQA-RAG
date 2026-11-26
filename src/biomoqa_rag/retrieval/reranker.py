@@ -20,18 +20,45 @@ class SemanticReranker:
     providing better relevance scores than bi-encoders.
     """
 
-    def __init__(self, model_name: str = 'cross-encoder/ms-marco-MiniLM-L-6-v2'):
+    def __init__(self, model_name: str = 'cross-encoder/ms-marco-MiniLM-L-12-v2', device: str = "cpu"):
         """
         Initialize reranker with a cross-encoder model.
 
         Args:
             model_name: HuggingFace model name for cross-encoder
-                       Default: ms-marco-MiniLM (fast, good for biomedical)
-                       Alternative: cross-encoder/ms-marco-MedMarco-electra-base (slower, better)
+            device: "cpu" or "cuda"
         """
-        print(f"Loading reranker: {model_name}")
-        self.model = CrossEncoder(model_name, device="cpu")
+        print(f"Loading reranker: {model_name} on {device}")
+        self.model = CrossEncoder(model_name, device=device, max_length=512)
         print("✓ Reranker loaded")
+
+    def score(self, question: str, documents: List[Document], batch_size: int = 32) -> List[float]:
+        """One relevance logit per document, scored against `question`.
+
+        Computed from the model's raw output rather than CrossEncoder.predict, whose
+        activation (identity or sigmoid) has changed between sentence-transformers
+        versions; the depth pipeline applies its own sigmoid. The text is the title, a
+        space and the abstract, as in the tests the thresholds come from.
+        """
+        import torch
+
+        if not documents:
+            return []
+        texts = [(f"{doc.title or ''}".strip() + " " + f"{doc.abstract or ''}".strip()).strip()
+                 for doc in documents]
+        tok, net = self.model.tokenizer, self.model.model
+        device = next(net.parameters()).device
+        out: List[float] = []
+        for i in range(0, len(texts), batch_size):
+            chunk = texts[i:i + batch_size]
+            feats = tok([question] * len(chunk), chunk, padding=True, truncation=True,
+                        max_length=512, return_tensors="pt")
+            feats = {k: v.to(device) for k, v in feats.items()}
+            with torch.no_grad():
+                logits = net(**feats).logits
+            vals = logits[:, 0] if logits.shape[-1] == 1 else logits[:, -1]
+            out.extend(float(v) for v in vals.cpu())
+        return out
 
     def rerank(
         self,
