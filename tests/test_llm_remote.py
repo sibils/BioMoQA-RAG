@@ -14,6 +14,7 @@ class Fake(BaseHTTPRequestHandler):
     last_body = None
     lock = threading.Lock()
     open_now, most_open = 0, 0       # requests being answered at the same time
+    seen = 0                         # requests received
 
     def log_message(self, *a):
         pass
@@ -32,6 +33,15 @@ class Fake(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0))
         Fake.last_body = json.loads(self.rfile.read(n))
         b = Fake.behaviour
+        Fake.seen += 1
+        if b.get("sequence"):            # refusals to send before answering: (status, headers)
+            status, headers = b["sequence"].pop(0)
+            self.send_response(status)
+            for k, v in headers.items():
+                self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(b'{"error": "refused"}')
+            return
         if b["status"] != 200:
             self.send_response(b["status"])
             self.end_headers()
@@ -60,7 +70,7 @@ def server():
     th = threading.Thread(target=srv.serve_forever, daemon=True)
     th.start()
     Fake.behaviour = {"delay": 0.0, "status": 200, "pieces": ["Adults ", "are ", "2 mm [0]."], "error": None}
-    Fake.open_now, Fake.most_open = 0, 0
+    Fake.open_now, Fake.most_open, Fake.seen = 0, 0, 0
     yield f"http://127.0.0.1:{srv.server_address[1]}/v1"
     srv.shutdown()
 
@@ -130,6 +140,36 @@ def test_requests_made_together_reach_the_server_together(server):
         t.join()
     assert len(texts) == 6 and Fake.most_open == 6
     assert time.perf_counter() - t0 < 1.5      # one answer's time, not six in a row (3 s)
+
+
+def test_a_batch_call_waits_as_the_gateway_asks_and_tries_again(server):
+    Fake.behaviour["sequence"] = [(429, {"Retry-After": "1"}), (503, {"Retry-After": "1"})]
+    t0 = time.perf_counter()
+    c = call(server, total=10.0, retry_busy=True)
+    assert c.text == "Adults are 2 mm [0]." and Fake.seen == 3
+    assert 2.0 <= time.perf_counter() - t0 < 5.0      # waited 1 s twice
+
+
+def test_a_persons_call_does_not_wait(server):
+    Fake.behaviour["sequence"] = [(429, {"Retry-After": "1"})]
+    with pytest.raises(LLMUnavailable) as e:
+        call(server)
+    assert e.value.reason == "busy" and e.value.retry_after == 1.0 and Fake.seen == 1
+
+
+def test_no_retry_when_the_wait_would_pass_the_time_limit(server):
+    Fake.behaviour["sequence"] = [(503, {"Retry-After": "30"})]
+    t0 = time.perf_counter()
+    with pytest.raises(LLMUnavailable) as e:
+        call(server, total=5.0, retry_busy=True)
+    assert e.value.reason == "busy" and Fake.seen == 1 and time.perf_counter() - t0 < 1.0
+
+
+def test_a_gateway_timeout_is_not_retried(server):
+    Fake.behaviour["sequence"] = [(504, {"x-should-retry": "false"})]
+    with pytest.raises(LLMUnavailable) as e:
+        call(server, total=10.0, retry_busy=True)
+    assert e.value.reason == "slow" and Fake.seen == 1
 
 
 def test_server_down_is_unreachable():

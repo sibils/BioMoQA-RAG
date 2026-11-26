@@ -1053,7 +1053,8 @@ def answer_question_post(request: QuestionRequest, http_request: Request):
 
     A POST that does not come from a web browser (a script) is a batch job, recognised
     automatically: its answers are written at low priority on the shared language-model
-    server and may take up to about 100 s. If the model still does not answer, the
+    server and may take up to about 100 s; when the server says it is full or restarting
+    (429 or 503), the request waits as asked and is sent again. If the model still does not answer, the
     response carries `error` and no answers, never BioBERT's span in place of the
     generated answer. Requests from a browser keep the 4-second fallback.
 

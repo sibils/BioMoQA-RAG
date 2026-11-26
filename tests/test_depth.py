@@ -185,8 +185,8 @@ def test_a_batch_job_writes_its_own_queries_at_low_priority_and_may_wait():
     w.get(Q, batch=True)     # a script's: not served from the person's call, nor the reverse
     w.get(Q, batch=True)
     assert len(calls) == 2
-    assert calls[0]["priority"] is None and calls[0]["first_token_timeout"] == 3.0
-    assert calls[1]["priority"] == 10 and calls[1]["first_token_timeout"] == 30.0
+    assert calls[0]["priority"] is None and calls[0]["first_token_timeout"] == 3.0 and not calls[0]["retry_busy"]
+    assert calls[1]["priority"] == 10 and calls[1]["first_token_timeout"] == 30.0 and calls[1]["retry_busy"]
 
 
 def test_every_note_has_a_message():

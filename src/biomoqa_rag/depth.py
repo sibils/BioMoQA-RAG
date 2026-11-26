@@ -239,6 +239,7 @@ class SubQueryWriter:
                                  "json_schema": {"name": "subqueries", "schema": SUBQ_SCHEMA}},
                 first_token_timeout=limit, total_timeout=limit,
                 priority=self.batch_priority if batch else None,
+                retry_busy=batch,
             )
         except LLMUnavailable as e:
             return SubQueries(failed=e.reason, seconds=time.perf_counter() - t0)

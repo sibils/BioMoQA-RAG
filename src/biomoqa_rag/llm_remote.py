@@ -26,11 +26,22 @@ import requests
 class LLMUnavailable(Exception):
     """The language model did not answer in time, or could not be reached."""
 
-    def __init__(self, reason: str, detail: str = ""):
+    def __init__(self, reason: str, detail: str = "", retry_after: Optional[float] = None):
         super().__init__(f"{reason}: {detail}" if detail else reason)
-        # "slow": no first token or no complete reply in time; "busy": the gateway refused
-        # (429); "unreachable": no connection; "error": any other failed reply.
+        # "slow": no first token or no complete reply in time, or the gateway timed out (504);
+        # "busy": the gateway's caps are full (429) or the model is restarting (503);
+        # "unreachable": no connection; "error": any other failed reply.
         self.reason = reason
+        # Seconds the gateway asked to wait before trying again (429 and 503 only).
+        self.retry_after = retry_after
+
+
+def _retry_after(resp, default: float = 10.0) -> float:
+    """The wait a 429 or 503 asks for (the LLM gateway's 503 sends 10 s)."""
+    try:
+        return max(0.0, float(resp.headers.get("Retry-After", default)))
+    except (TypeError, ValueError):
+        return default
 
 
 @dataclass
@@ -87,10 +98,13 @@ class RemoteLLM:
         first_token_timeout: Optional[float] = None,
         total_timeout: Optional[float] = None,
         priority: Optional[int] = None,
+        retry_busy: bool = False,
     ) -> Completion:
         """One completion. `prefix` pre-fills the assistant turn; the reply continues it
         and does not repeat it. `priority` overrides the client's (batch jobs send a
-        positive one, so the server serves people first). Raises LLMUnavailable on any
+        positive one, so the server serves people first). With `retry_busy`, a 429 or
+        503 is waited out as the gateway asks (Retry-After) and the request sent again,
+        while the whole call stays within `total_timeout`. Raises LLMUnavailable on any
         failure or time limit."""
         first_limit = self.first_token_timeout if first_token_timeout is None else first_token_timeout
         total_limit = self.total_timeout if total_timeout is None else total_timeout
@@ -123,6 +137,23 @@ class RemoteLLM:
         if logprobs:
             body["logprobs"] = True
 
+        start = time.perf_counter()
+        while True:
+            left = total_limit - (time.perf_counter() - start)
+            try:
+                return self._attempt(body, min(first_limit, left), left)
+            except LLMUnavailable as e:
+                left = total_limit - (time.perf_counter() - start)
+                # The gateway says when to come back (429: its request caps are full; 503: the
+                # model is restarting). A batch job waits and asks again, as the server's
+                # documentation expects of clients, as long as the wait fits in its time
+                # limit; a person's request does not wait (its answer is sent at once).
+                if not (retry_busy and e.retry_after is not None and e.retry_after + 1.0 < left):
+                    raise
+                time.sleep(e.retry_after)
+
+    def _attempt(self, body: dict, first_limit: float, total_limit: float) -> Completion:
+        """One request to the server, streamed; LLMUnavailable on any failure or time limit."""
         t0 = time.perf_counter()
         # The read timeout bounds every wait for the next bytes: before the first token
         # it is the first-token limit, and a stall in the middle of a reply ends it too.
@@ -141,8 +172,13 @@ class RemoteLLM:
             raise LLMUnavailable("unreachable", str(e)[:200]) from e
 
         with resp:
-            if resp.status_code == 429:
-                raise LLMUnavailable("busy", "the server refused more requests (429)")
+            if resp.status_code in (429, 503):
+                why = "its request caps are full" if resp.status_code == 429 else "the model is restarting"
+                raise LLMUnavailable("busy", f"the server refused the request, {why} ({resp.status_code})",
+                                     retry_after=_retry_after(resp))
+            if resp.status_code == 504:
+                # The gateway stopped waiting for the model; it marks this reply not to be retried.
+                raise LLMUnavailable("slow", "the gateway timed out (504)")
             if resp.status_code != 200:
                 raise LLMUnavailable("error", f"HTTP {resp.status_code}: {resp.text[:200]}")
             parts: List[str] = []

@@ -119,9 +119,10 @@ skipped for the same reason, `notes` holds `depth_reduced`. Show `message` as it
 **Batch jobs** are recognised automatically: a POST that does not come from a web browser
 (a script, such as the Kybele trait pipeline; browsers send `Sec-Fetch-Mode` and `Origin`).
 Its answers are written at low priority on the shared server, after people's, and it may wait
-up to about 100 s (`[llm] batch_*` in `config.toml`). It never gets BioBERT's answer in place
-of a generated one: if the model still does not answer, the response has no answers and says
-why in `error`. Requests from the web page keep the 4-second fallback.
+up to about 100 s (`[llm] batch_*` in `config.toml`). When the server's gateway says it is full
+or restarting (429 or 503, with `Retry-After`), a batch job waits as asked and sends the request
+again, within that time. It never gets BioBERT's answer in place of a generated one: if the
+model still does not answer, the response has no answers and says why in `error`. Requests from the web page keep the 4-second fallback.
 
 ### Direct-document mode (`doc_refs`)
 

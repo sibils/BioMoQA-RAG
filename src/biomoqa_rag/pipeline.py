@@ -1023,7 +1023,8 @@ class RAGPipeline:
         if batch:   # behind people's requests on the shared server, and allowed to wait
             kwargs.update(priority=self.config.llm_batch_priority,
                           first_token_timeout=self.config.llm_batch_first_token_timeout,
-                          total_timeout=self.config.llm_batch_total_timeout)
+                          total_timeout=self.config.llm_batch_total_timeout,
+                          retry_busy=True)
         comp = self.remote.chat(messages, seed=0, **kwargs)
         if not comp.text.strip():
             comp = self.remote.chat(messages, seed=1, **kwargs)

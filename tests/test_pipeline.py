@@ -145,11 +145,12 @@ def test_a_batch_job_waits_at_low_priority_and_never_gets_biobert_instead():
     p = pipe()
     answers, mode = p._read(Q, [d(1)], "generative", [], batch=True)
     kw = p.remote.calls[0]
-    assert mode == "generative" and kw["priority"] == 10
+    assert mode == "generative" and kw["priority"] == 10 and kw["retry_busy"] is True
     assert kw["first_token_timeout"] == 60.0 and kw["total_timeout"] == 100.0
     p = pipe()
     p._read(Q, [d(1)], "generative", [])                 # a person's request: the defaults
     assert "priority" not in p.remote.calls[0] and "first_token_timeout" not in p.remote.calls[0]
+    assert "retry_busy" not in p.remote.calls[0]
 
 
 def test_batch_reaches_the_deep_queries():
