@@ -5,9 +5,12 @@ This module implements the retrieval stage (R) of the Ragnarok RAG pipeline.
 It queries the SIBILS biodiversity/biomedical API to retrieve relevant documents.
 """
 
+import copy
 import hashlib
-import pickle
+import json
+import re
 import shelve
+import threading
 import time
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -55,6 +58,13 @@ class SIBILSRetriever:
 
     # Valid collection names
     VALID_COLLECTIONS = {"medline", "plazi", "pmc"}
+
+    # Part of every cache key. Bump it when what a search returns changes, so results
+    # cached by an older build are not replayed for the next cache_ttl (7 days).
+    CACHE_VERSION = "2026-11-26"
+
+    # Names the query parser tags as taxa although they are not one.
+    JUNK_TAXA = {"Scientific name"}
 
     def __init__(
         self,
@@ -118,21 +128,23 @@ class SIBILSRetriever:
         if cache_dir:
             Path(cache_dir).mkdir(parents=True, exist_ok=True)
             self._cache_path = str(Path(cache_dir) / "cache")
+        # One request searches several lists at once; the shelve file takes one at a time.
+        self._cache_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Cache helpers
     # ------------------------------------------------------------------
 
-    def _cache_key(self, question: str, collection: str, n: int) -> str:
-        raw = f"{question.lower().strip()}|{collection}|{n}"
+    def _cache_key(self, question: str, collection: str, n: int, kind: str = "today") -> str:
+        raw = f"{self.CACHE_VERSION}|{kind}|{question.lower().strip()}|{collection}|{n}"
         return hashlib.md5(raw.encode()).hexdigest()
 
-    def _cache_get(self, question: str, collection: str, n: int) -> Optional[List["Document"]]:
+    def _cache_get(self, question: str, collection: str, n: int, kind: str = "today") -> Optional[List["Document"]]:
         if not self._cache_path:
             return None
-        key = self._cache_key(question, collection, n)
+        key = self._cache_key(question, collection, n, kind)
         try:
-            with shelve.open(self._cache_path) as db:
+            with self._cache_lock, shelve.open(self._cache_path) as db:
                 entry = db.get(key)
             if entry:
                 docs = entry["docs"]
@@ -146,7 +158,7 @@ class SIBILSRetriever:
             pass
         return None
 
-    def _cache_set(self, question: str, collection: str, n: int, docs: List["Document"]) -> None:
+    def _cache_set(self, question: str, collection: str, n: int, docs: List["Document"], kind: str = "today") -> None:
         if not self._cache_path:
             return
         if not docs:
@@ -154,9 +166,9 @@ class SIBILSRetriever:
             # ES hiccup) would otherwise be replayed to every subsequent request
             # for the same query. Real results are still cached for cache_ttl.
             return
-        key = self._cache_key(question, collection, n)
+        key = self._cache_key(question, collection, n, kind)
         try:
-            with shelve.open(self._cache_path) as db:
+            with self._cache_lock, shelve.open(self._cache_path) as db:
                 db[key] = {"ts": time.time(), "docs": docs}
         except Exception:
             pass
@@ -223,34 +235,6 @@ class SIBILSRetriever:
         self._cache_set(question, collection, n, docs)
         return docs
 
-    @staticmethod
-    def _with_abstract_filter(es_query: dict) -> dict:
-        """
-        Return a copy of *es_query* that also requires a non-empty abstract.
-
-        Many Medline citations are title-only (empty abstract). The extractive
-        model then 'extracts' the title, producing junk answers like "Disease".
-        A `wildcard: {abstract: "*"}` filter drops those at the source while
-        preserving recall (an empty-string abstract indexes no terms, so the
-        wildcard excludes it). Applied to Medline only — Plazi/PMC carry their
-        text in other fields.
-        """
-        import copy
-        q = copy.deepcopy(es_query)
-        query = q.get("query")
-        abstract_filter = {"wildcard": {"abstract": "*"}}
-        if isinstance(query, dict) and "bool" in query:
-            query["bool"].setdefault("filter", []).append(abstract_filter)
-        else:
-            # Wrap whatever query is present in a bool so we can attach the filter
-            q["query"] = {
-                "bool": {
-                    "must": [query] if query else [],
-                    "filter": [abstract_filter],
-                }
-            }
-        return q
-
     # Fields in which a taxon name is required to appear as a phrase, per collection.
     _TAXON_FIELDS = {
         "medline": ["title", "abstract"],
@@ -277,8 +261,9 @@ class SIBILSRetriever:
                         ott = val.get("annotations.all", "")
                         if isinstance(ott, str) and ott.startswith("ott|"):
                             parts = ott.split("|", 2)
-                            if len(parts) == 3 and " " in parts[2].strip():
-                                taxa.append((parts[2].strip(), ott))
+                            name = parts[2].strip() if len(parts) == 3 else ""
+                            if " " in name and name not in SIBILSRetriever.JUNK_TAXA:
+                                taxa.append((name, ott))
                     else:
                         walk(val)
             elif isinstance(obj, list):
@@ -294,31 +279,35 @@ class SIBILSRetriever:
                 out.append((name, ott))
         return out
 
+    def _taxon_filter(self, taxa: list[tuple[str, str]], collection: str) -> dict:
+        """The species filter: a document must name one of the recognised binomials as a
+        phrase in the collection's text fields, or carry that exact taxon annotation.
+
+        One of them, not all: a question naming four species was required to find all four
+        in one abstract and found nothing. The epithet alone still never qualifies.
+        """
+        fields = self._TAXON_FIELDS.get(collection, ["title", "abstract"])
+        should = []
+        for name, ott in taxa:
+            should.append({"multi_match": {"query": name, "type": "phrase", "fields": fields}})
+            if ott:
+                should.append({"term": {"annotations.all": ott}})
+        return {"bool": {"should": should, "minimum_should_match": 1}}
+
     def _with_taxon_phrase(self, es_query: dict, taxa: list[tuple[str, str]], collection: str) -> dict:
         """
-        Return a copy of *es_query* that also requires each recognised binomial to
-        appear as an adjacent phrase (or carry the taxon annotation).
+        Return a copy of *es_query* that also requires one of the recognised binomials
+        as an adjacent phrase (or the taxon annotation).
 
         This is added as a filter, so it constrains WHICH documents match without
-        changing the relevance scoring produced by the parser. A document qualifies
-        if it contains the binomial as a phrase in the collection's text fields OR
-        is annotated with that exact taxon — high precision, without losing
-        annotation-based recall.
+        changing the relevance scoring produced by the parser.
         """
-        import copy
-        fields = self._TAXON_FIELDS.get(collection, ["title", "abstract"])
         q = copy.deepcopy(es_query)
         query = q.get("query")
         if not (isinstance(query, dict) and "bool" in query):
             query = {"bool": {"must": [query] if query else []}}
             q["query"] = query
-        bool_q = query["bool"]
-        for name, ott in taxa:
-            should = [{"multi_match": {"query": name, "type": "phrase", "fields": fields}}]
-            if ott:
-                should.append({"term": {"annotations.all": ott}})
-            bool_q.setdefault("filter", []).append(
-                {"bool": {"should": should, "minimum_should_match": 1}})
+        query["bool"].setdefault("filter", []).append(self._taxon_filter(taxa, collection))
         return q
 
     def _parse_hits(self, data: dict, collection: str) -> List[Document]:
@@ -348,45 +337,66 @@ class SIBILSRetriever:
             documents.append(doc)
         return documents
 
+    # Brackets and quotes glued to a word make the query parser reject the question
+    # (HTTP 400): 16 of 258 test questions, such as "adriamycin(doxorubicin)?".
+    _PARSER_BREAKERS = re.compile(r'[()\[\]"]')
+
+    def parse(self, question: str, collection: str):
+        """The parser's reading of the question, and the binomials it recognised.
+
+        A question the parser rejects is tried once more with its brackets and quotes
+        replaced by spaces; that gave documents for 15 of the 16 rejected test questions.
+        Returns (parsed_query or None, taxa, the text that was parsed).
+        """
+        if not (self.use_query_parser and self.query_parser):
+            return None, [], question
+        text = question
+        parsed = self.query_parser.parse(text, collection=collection, include_es_query=self.use_es_query)
+        if not parsed.success and self._PARSER_BREAKERS.search(question):
+            text = " ".join(self._PARSER_BREAKERS.sub(" ", question).split())
+            parsed = self.query_parser.parse(text, collection=collection, include_es_query=self.use_es_query)
+        taxa = []
+        if self.enforce_taxon_phrase and parsed.success and parsed.es_query:
+            taxa = self._extract_taxa(parsed.es_query)
+        return parsed, taxa, text
+
+    def _post(self, es_query: dict, collection: str, n: int, timeout: float) -> List[Document]:
+        response = requests.post(
+            self.api_url,
+            params={"col": collection, "n": n},
+            data={"jq": json.dumps(es_query)},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not data.get("success", False):
+            raise Exception(f"SIBILS API error: {data.get('error', 'Unknown error')}")
+        return self._parse_hits(data, collection)
+
     def _retrieve_single_uncached(
         self,
         question: str,
         n: int,
         collection: str,
+        parsed=None,
     ) -> List[Document]:
-        """Raw SIBILS API call — no caching."""
+        """Today's query: the parser's query for the collection, with the species filter.
 
-        # Parse query if enabled
-        parsed_query = None
-        use_es_mode = False
-
-        if self.use_query_parser and self.query_parser:
-            # Parse with ES query generation if enabled
-            parsed_query = self.query_parser.parse(
-                question,
-                collection=collection,
-                include_es_query=self.use_es_query
-            )
-
-            # Try ES query first if available
-            if self.use_es_query and parsed_query.success and parsed_query.es_query:
-                use_es_mode = True
-
-        # Binomials the parser recognised (OTT-annotated), required in every path.
-        taxa = []
-        if self.enforce_taxon_phrase and parsed_query and parsed_query.success and parsed_query.es_query:
-            taxa = self._extract_taxa(parsed_query.es_query)
+        Falls back to a keyword GET when the parser gives no query or the query finds
+        nothing. Raw SIBILS call, no caching. `parsed` = a result of parse(), to reuse.
+        """
+        parsed_query, taxa, text = parsed if parsed is not None else self.parse(question, collection)
+        use_es_mode = bool(self.use_es_query and parsed_query is not None
+                           and parsed_query.success and parsed_query.es_query)
 
         try:
             docs = None
 
-            if use_es_mode and parsed_query.es_query:
-                # Try POST with Elasticsearch query (jq parameter)
-                import json
+            if use_es_mode:
+                # Medline used to add a `wildcard abstract:*` filter here to drop title-only
+                # citations. It cost a median 1.8 s per lookup, and _parse_hits drops those
+                # citations anyway: the delivered lists were identical for 242 of 242 questions.
                 es_query = parsed_query.es_query
-                if collection == "medline":
-                    # Exclude title-only citations (empty abstract) at the source.
-                    es_query = self._with_abstract_filter(es_query)
                 if taxa:
                     # Require a recognised binomial as a phrase so the specific
                     # epithet alone cannot match a different organism.
@@ -404,12 +414,12 @@ class SIBILSRetriever:
                 # If ES query succeeded but returned 0 hits, fall through to keyword GET below
 
             if docs is None:
-                # Keyword GET: use parsed keywords if available, else raw question
-                if parsed_query and parsed_query.success and parsed_query.text_parts:
+                # Keyword GET: use parsed keywords if available, else the (bracket-free) text
+                if parsed_query is not None and parsed_query.success and parsed_query.text_parts:
                     keywords = [p for p in parsed_query.text_parts if p not in ['?', '!', '.', ',']]
-                    query_text = ' '.join(keywords) if keywords else question
+                    query_text = ' '.join(keywords) if keywords else text
                 else:
-                    query_text = question
+                    query_text = text
 
                 response = requests.get(
                     self.api_url,
@@ -436,6 +446,60 @@ class SIBILSRetriever:
 
         except requests.exceptions.RequestException as e:
             raise Exception(f"Failed to query SIBILS API: {str(e)}")
+
+    # ------------------------------------------------------------------
+    # The lists the depth pipeline merges
+    # ------------------------------------------------------------------
+
+    # Fields a plain OR search matches, per collection.
+    _PLAIN_FIELDS = {
+        "medline": ["title", "abstract"],
+        "pmc":     ["title", "abstract"],
+        "plazi":   ["treatment_title", "title", "text"],
+    }
+
+    def today_list(self, question: str, collection: str, n: int, parsed=None) -> List[Document]:
+        """Today's query (cache-aware). `parsed` = a result of parse(), to reuse."""
+        cached = self._cache_get(question, collection, n, "today")
+        if cached is not None:
+            return cached
+        docs = self._retrieve_single_uncached(question, n, collection, parsed=parsed)
+        self._cache_set(question, collection, n, docs, "today")
+        return docs
+
+    def plain_search(
+        self,
+        text: str,
+        collection: str,
+        n: int,
+        taxa: list[tuple[str, str]],
+        timeout: Optional[float] = None,
+    ) -> List[Document]:
+        """Any of the words of `text`, ranked by BM25, with the species filter (cache-aware).
+
+        With a `timeout`, a search that fails or takes longer returns an empty list:
+        that is how the optional searches of the deep mode are run.
+        """
+        words = " ".join(re.sub(r"[^\w\s\-\.]", " ", text or "").split())
+        if not words:
+            return []
+        names = "|".join(sorted(name for name, _ in taxa))
+        kind = f"or|{names}"
+        cached = self._cache_get(words, collection, n, kind)
+        if cached is not None:
+            return cached
+        fields = self._PLAIN_FIELDS.get(collection, ["title", "abstract"])
+        query: dict = {"multi_match": {"query": words, "fields": fields, "operator": "or"}}
+        if taxa:
+            query = {"bool": {"must": [query], "filter": [self._taxon_filter(taxa, collection)]}}
+        try:
+            docs = self._post({"query": query}, collection, n, timeout or self.timeout)
+        except Exception:
+            if timeout is not None:
+                return []
+            raise
+        self._cache_set(words, collection, n, docs, kind)
+        return docs
 
     def retrieve_batch(
         self,
