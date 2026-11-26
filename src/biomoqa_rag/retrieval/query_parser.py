@@ -6,7 +6,10 @@ natural language questions into optimized Elasticsearch queries with
 concept annotations and expansions.
 """
 
+import copy
+import threading
 import requests
+from collections import OrderedDict
 from typing import Dict, Optional, List
 from dataclasses import dataclass
 import time
@@ -45,6 +48,8 @@ class SIBILSQueryParser:
         collection: str = "medline",
         timeout: int = 10,
         cache_enabled: bool = True,
+        cache_size: int = 1024,
+        cache_ttl: float = 24 * 3600,
     ):
         """
         Initialize SIBILS query parser.
@@ -53,13 +58,20 @@ class SIBILSQueryParser:
             api_url: SIBILS query parser API endpoint
             collection: Target collection for ES query generation ("medline", "plazi", "pmc", etc.)
             timeout: Request timeout in seconds
-            cache_enabled: Enable in-memory caching of parsed queries
+            cache_enabled: Keep successful parses in memory
+            cache_size: Parses kept at most; the least recently used goes first
+            cache_ttl: Seconds a parse is reused before the parser is asked again
         """
         self.api_url = api_url
         self.collection = collection
         self.timeout = timeout
         self.cache_enabled = cache_enabled
-        self._cache: Dict[str, ParsedQuery] = {}
+        self.cache_size = cache_size
+        self.cache_ttl = cache_ttl
+        # Bounded: the service runs for weeks, and every new question used to stay here
+        # until a restart. Failed parses are never kept, so a failed call is retried.
+        self._cache: "OrderedDict[tuple, tuple[float, ParsedQuery]]" = OrderedDict()
+        self._cache_lock = threading.Lock()   # the three collection calls parse at once
 
     def parse(
         self,
@@ -82,12 +94,11 @@ class SIBILSQueryParser:
         Returns:
             ParsedQuery object with normalized query, ES query, and metadata
         """
-        # Check cache
-        cache_key = f"{query}:{collection or self.collection}"
-        if self.cache_enabled and cache_key in self._cache:
-            return self._cache[cache_key]
-
         collection = collection or self.collection
+        cache_key = (query, collection, normalized, include_es_query, include_text_parts)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
 
         # Build request parameters
         params = {
@@ -135,10 +146,7 @@ class SIBILSQueryParser:
                 success=True,
             )
 
-            # Cache the result
-            if self.cache_enabled:
-                self._cache[cache_key] = parsed
-
+            self._cache_put(cache_key, parsed)
             return parsed
 
         except requests.exceptions.RequestException as e:
@@ -159,8 +167,6 @@ class SIBILSQueryParser:
         Returns:
             Cleaned query dictionary
         """
-        import copy
-
         cleaned = copy.deepcopy(es_query)
         punctuation_to_remove = set('?!.,;:')
 
@@ -210,9 +216,34 @@ class SIBILSQueryParser:
         result = clean_query_value(cleaned)
         return result if result is not None else cleaned
 
+    def _cache_get(self, key: tuple) -> Optional[ParsedQuery]:
+        if not self.cache_enabled:
+            return None
+        with self._cache_lock:
+            entry = self._cache.get(key)
+            if entry is None:
+                return None
+            stored_at, parsed = entry
+            if time.monotonic() - stored_at > self.cache_ttl:
+                del self._cache[key]
+                return None
+            self._cache.move_to_end(key)
+        # A copy each time, so a caller that edits its query cannot change the next request's.
+        return copy.deepcopy(parsed)
+
+    def _cache_put(self, key: tuple, parsed: ParsedQuery) -> None:
+        if not self.cache_enabled or self.cache_size <= 0:
+            return
+        with self._cache_lock:
+            self._cache[key] = (time.monotonic(), copy.deepcopy(parsed))
+            self._cache.move_to_end(key)
+            while len(self._cache) > self.cache_size:
+                self._cache.popitem(last=False)
+
     def clear_cache(self):
         """Clear the query cache."""
-        self._cache.clear()
+        with self._cache_lock:
+            self._cache.clear()
 
 
 def main():
