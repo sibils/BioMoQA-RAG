@@ -55,16 +55,20 @@ def _setup_mig_cuda():
 
 _setup_mig_cuda()
 
+import dataclasses
+import json
 import logging
+from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict
+from typing import Literal, Optional, List, Dict
 
 import requests
 import threading
 import time as _time
 from .config import get_config
+from .depth import DepthSettings
 from .pipeline import RAGPipeline, RAGConfig
 
 
@@ -72,18 +76,35 @@ from .pipeline import RAGPipeline, RAGConfig
 # The frontend calls /qa 4× in parallel (one per collection tab).
 # The first call runs the full pipeline and caches; the other 3 wait and
 # return from cache immediately, avoiding 4× sequential vLLM generations.
-_multi_cache: dict = {}           # (question, mode) -> (result, timestamp)
-_multi_in_flight: dict = {}       # (question, mode) -> threading.Event
+_multi_cache: dict = {}           # (question, mode, depth, sizes, batch) -> (result, timestamp, ttl)
+_multi_in_flight: dict = {}       # same key -> threading.Event
 _multi_cache_mutex = threading.Lock()
 _MULTI_CACHE_TTL = 120            # seconds
+# An answer given with a fallback note says "try again in a moment": kept only long enough for
+# the calls already waiting on it, so a retry gets a fresh run.
+_DEGRADED_TTL = 10
+_DEGRADED_CODES = {"extractive_fallback", "depth_reduced"}
 
 
-def _get_or_run_multi(pipeline, question, mode, retrieval, retrieval_n, final_n, debug):
-    key = (question, mode, retrieval, retrieval_n, final_n)
+def _is_batch(http_request: Request) -> bool:
+    """A batch job is a POST that does not come from a web browser.
+
+    Every current browser sends Sec-Fetch-Mode with each request, and Origin with a POST;
+    scripts such as the Kybele trait pipeline send neither. A batch job's answer is written at
+    low priority on the shared server, may wait ([llm] batch_* in config.toml), and fails with
+    `error` rather than falling back to BioBERT. GET /QA, the web page's endpoint, never is one.
+    """
+    h = http_request.headers
+    return http_request.method == "POST" and not (h.get("sec-fetch-mode") or h.get("origin"))
+
+
+def _get_or_run_multi(pipeline, question, mode, retrieval, retrieval_n, final_n, debug, depth=None,
+                      batch=False):
+    key = (question, mode, depth, retrieval_n, final_n, batch)
     with _multi_cache_mutex:
         if key in _multi_cache:
-            result, ts = _multi_cache[key]
-            if _time.time() - ts < _MULTI_CACHE_TTL:
+            result, ts, ttl = _multi_cache[key]
+            if _time.time() - ts < ttl:
                 return result
         if key in _multi_in_flight:
             event = _multi_in_flight[key]
@@ -96,10 +117,12 @@ def _get_or_run_multi(pipeline, question, mode, retrieval, retrieval_n, final_n,
         try:
             result = pipeline.run_multi_collection(
                 question=question, retrieval_n=retrieval_n,
-                final_n=final_n, mode=mode, retrieval=retrieval, debug=debug,
+                final_n=final_n, mode=mode, retrieval=retrieval, debug=debug, depth=depth,
+                batch=batch,
             )
+            degraded = bool(_DEGRADED_CODES & set(result.get("_notes") or []))
             with _multi_cache_mutex:
-                _multi_cache[key] = (result, _time.time())
+                _multi_cache[key] = (result, _time.time(), _DEGRADED_TTL if degraded else _MULTI_CACHE_TTL)
                 _multi_in_flight.pop(key, None)
             event.set()
             return result
@@ -125,6 +148,58 @@ logging.basicConfig(
 )
 logger = logging.getLogger("biomoqa")
 
+
+class _NoQueryString(logging.Filter):
+    """Keep questions out of the access log: GET /QA carries the question in its query
+    string, and the service logs times and codes, never what people asked."""
+
+    def filter(self, record):
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            record.args = args[:2] + (args[2].split("?", 1)[0],) + args[3:]
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_NoQueryString())
+
+
+def _log_request(endpoint: str, **fields) -> None:
+    """One line per question: depth, mode, collection, timings and fallback codes.
+    Never the question text."""
+    logger.info("qa_request %s", json.dumps({"endpoint": endpoint, **fields}, default=str))
+
+
+def _log_doc_refs(endpoint: str, mode: str, batch: bool, result: dict) -> None:
+    _log_request(endpoint + " doc_refs", mode=mode, batch=batch, mode_used=result.get("mode_used"),
+                 notes=sorted({n["code"] for r in result.get("collection_results", []) for n in r.get("notes") or []}),
+                 n_docs=result.get("ndocs_retrieved"), seconds=result.get("pipeline_time"), success=True)
+
+
+def _running_commit() -> Optional[str]:
+    """The commit this code was installed from: pip records it for an install from git
+    (direct_url.json); in a working tree, git's HEAD. None when neither is known."""
+    try:
+        from importlib.metadata import distribution
+        raw = distribution("biomoqa-rag").read_text("direct_url.json")
+        if raw:
+            commit = (json.loads(raw).get("vcs_info") or {}).get("commit_id")
+            if commit:
+                return commit
+    except Exception:
+        pass
+    try:
+        import subprocess
+        out = subprocess.run(["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "HEAD"],
+                             capture_output=True, text=True, timeout=2)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+_COMMIT = _running_commit()
+
 # ---------------------------------------------------------------------------
 # OpenAPI metadata
 # ---------------------------------------------------------------------------
@@ -132,9 +207,10 @@ logger = logging.getLogger("biomoqa")
 _APP_DESCRIPTION = """
 ## BioMoQA RAG — Biomedical Question Answering
 
-Answers natural-language biomedical questions by combining **retrieval** from three literature
-collections with **LLM-based generation** (Qwen3-8B via vLLM) or **extractive span detection**
-(BioBERT).
+Answers natural-language biomedical questions from three literature collections. For each
+collection the service searches at the **depth** asked, keeps the five documents that best
+match the question, and reads them with a **language model** (generative) or **BioBERT**
+(extractive).
 
 ---
 
@@ -142,12 +218,18 @@ collections with **LLM-based generation** (Qwen3-8B via vLLM) or **extractive sp
 
 ```
 Question
-  └─▶ Retrieval  ── SIBILS BM25 (sparse)  ─┐
-                 └─ FAISS dense + reranker ─┴─▶ top-k docs
-       └─▶ Relevance filter
-             └─▶ Generation (Qwen3-8B) or Extraction (BioBERT)
-                   └─▶ Answer + sentence-level citations
+  └─▶ Searches per collection
+        fast: the query parser's query + a plain OR search of the question's words
+        deep: the same + two searches written by the language model
+               (+ one on its guess, when it is sure of it)
+  └─▶ Cross-encoder reranker: every candidate scored against the question as asked
+  └─▶ The five best documents
+  └─▶ Generative (language model on the shared GPU server) or extractive (BioBERT)
+  └─▶ Answer + the documents it cites
 ```
+
+When the language model is slow or unavailable, a generative request gets the extractive
+answer at once, with `mode_used: "extractive"` and a note in `notes` saying so.
 
 ---
 
@@ -159,28 +241,29 @@ Question
 | `pmc` | PubMed Central | Full-text open-access articles |
 | `plazi` | Plazi | Biodiversity & taxonomy literature |
 
-All three collections are queried by default. Restrict with `col` (GET endpoint) or use
+`GET /QA` answers for one collection (`col`); `POST /qa` for all three, ranked. Use
 `doc_refs` to bypass retrieval entirely and target specific documents.
 
 ---
 
-### Answer modes
+### Depth (`depth`)
 
-| `mode` | Model | Output |
-|--------|-------|--------|
-| `generative` | Qwen3-8B (GPU, vLLM) | Fluent answer with inline `[N]` sentence-level citations |
-| `extractive` | BioBERT (CPU/GPU) | Verbatim span lifted from the best matching document + confidence score |
+| `depth` | What it does | Typical time: one collection · three at once |
+|---------|--------------|--------------|
+| `fast` *(default)* | Two keyword searches merged, reranked, five documents read | about 3 s · 6 s |
+| `deep` | Also searches written by the language model; the reranker still keeps five | about 5 s · 8 s |
+
+Each response says what ran (`depth_used`) and, in `notes`, when the service did less than
+asked. `retrieval` (`sparse`, `dense`) is still accepted and ignored.
 
 ---
 
-### Retrieval strategies
+### Answer modes (`mode`)
 
-| `retrieval` | Method | Best for |
-|-------------|--------|----------|
-| `sparse` | SIBILS BM25 keyword search | Exact terms, gene/drug names, acronyms |
-| `dense` | BM25 + FAISS semantic search + cross-encoder reranker | Conceptual questions, synonyms, paraphrases |
-
-Legacy aliases: `mode=hybrid` → `generative + dense`; `retrieval=rag` → `dense`.
+| `mode` | Reader | Output |
+|--------|--------|--------|
+| `generative` | Language model (shared GPU server) | A short answer; `docs` lists the documents it cites |
+| `extractive` | BioBERT | A span copied from a document, with offsets and a confidence score |
 
 ---
 
@@ -239,45 +322,63 @@ def get_pipeline():
     global pipeline
     if pipeline is None:
         logger.info("Initializing BioMoQA RAG pipeline...")
-
-        mode = config.model.mode
-        model_size = config.model.size
-
-        if mode == "cpu":
-            logger.info(f"Mode: CPU inference, model size: {model_size}")
-            rag_config = RAGConfig.cpu_config(model_size=model_size)
-        elif mode == "gpu_small":
-            logger.info("Mode: GPU (small model, ~8GB VRAM)")
-            rag_config = RAGConfig.gpu_small_config()
+        common = dict(
+            sibils_collections=config.sibils.collections,
+            sibils_cache_dir=config.sibils.cache_dir,
+            sibils_cache_ttl=config.sibils.cache_ttl,
+            sibils_empty_cache_ttl=config.sibils.empty_cache_ttl,
+            sibils_enforce_taxon_phrase=config.sibils.enforce_taxon_phrase,
+            default_depth=config.depth.default,
+            depth=DepthSettings(
+                candidates_per_search=config.depth.candidates_per_search,
+                subquery_timeout=config.depth.subquery_timeout,
+                extra_search_timeout=config.depth.extra_search_timeout,
+                min_agreement=config.depth.min_agreement,
+                max_new_words=config.depth.max_new_words,
+                guess_query=config.depth.guess_query,
+                guess_margin=config.depth.guess_margin,
+                batch_subquery_timeout=config.depth.batch_subquery_timeout,
+            ),
+            reranker_model=config.reranking.model,
+            reranker_device=config.reranking.device,
+            final_n=config.relevance_filter.final_n,
+            min_extractive_score=config.relevance_filter.min_extractive_score,
+            temperature=config.generation.temperature,
+            max_abstract_length=config.context.max_abstract_length,
+            llm_abstract_length=config.context.llm_abstract_length,
+            llm_whole_upto=config.context.llm_whole_upto,
+            truncate_abstracts=config.context.truncate_abstracts,
+            qa_device=config.extraction.device,
+            qa_model=config.extraction.model,
+            llm_base_url=config.llm.base_url,
+            llm_model=config.llm.model,
+            llm_first_token_timeout=config.llm.first_token_timeout,
+            llm_total_timeout=config.llm.total_timeout,
+            llm_priority=config.llm.priority,
+            llm_batch_priority=config.llm.batch_priority,
+            llm_batch_first_token_timeout=config.llm.batch_first_token_timeout,
+            llm_batch_total_timeout=config.llm.batch_total_timeout,
+        )
+        backend = config.generation.backend
+        if backend == "remote":
+            logger.info(f"Generation: shared server {config.llm.base_url} ({config.llm.model})")
+            rag_config = RAGConfig(generation_backend="remote", max_tokens=config.generation.max_tokens, **common)
+        elif backend == "cpu" or config.model.mode == "cpu":
+            logger.info(f"Generation: CPU inference, model size: {config.model.size}")
+            rag_config = dataclasses.replace(RAGConfig.cpu_config(model_size=config.model.size), **common)
+        elif config.model.mode == "gpu_small":
+            logger.info("Generation: GPU (small model, ~8GB VRAM)")
+            rag_config = dataclasses.replace(RAGConfig.gpu_small_config(), **common)
         else:
-            logger.info(f"Mode: GPU (default), model: {config.model.model_name}")
+            logger.info(f"Generation: GPU in this process, model: {config.model.model_name}")
             rag_config = RAGConfig(
+                generation_backend="vllm",
                 model_name=config.model.model_name,
-                retrieval_n=config.retrieval.retrieval_n,
-                use_smart_retrieval=config.retrieval.use_smart_retrieval,
-                hybrid_alpha=config.retrieval.hybrid_alpha,
-                use_reranking=config.reranking.enabled,
-                reranker_model=config.reranking.model,
-                rerank_n=config.reranking.top_k,
-                use_relevance_filter=config.relevance_filter.enabled,
-                final_n=config.relevance_filter.final_n,
-                min_extractive_score=config.relevance_filter.min_extractive_score,
-                max_tokens=config.generation.max_tokens,
-                temperature=config.generation.temperature,
-                max_abstract_length=config.context.max_abstract_length,
-                llm_abstract_length=config.context.llm_abstract_length,
-                truncate_abstracts=config.context.truncate_abstracts,
                 quantization=config.model.quantization,
                 gpu_memory_utilization=config.model.gpu_memory_utilization,
                 max_model_len=config.model.max_model_len,
-                qa_device=config.extraction.device,
-                qa_model=config.extraction.model,
-                dense_model=config.retrieval.dense_model,
-                sibils_cache_dir=config.sibils.cache_dir,
-                sibils_cache_ttl=config.sibils.cache_ttl,
-                sibils_empty_cache_ttl=config.sibils.empty_cache_ttl,
-                sibils_enforce_taxon_phrase=config.sibils.enforce_taxon_phrase,
-                sibils_collections=config.sibils.collections,
+                max_tokens=config.generation.max_tokens,
+                **common,
             )
 
         pipeline = RAGPipeline(rag_config)
@@ -312,16 +413,26 @@ class QuestionRequest(BaseModel):
         default=None,
         ge=1, le=100,
         description=(
-            "Number of documents fetched from SIBILS before reranking (default: 10, max: 100). "
-            "Higher values improve recall at the cost of latency (~0.2 s per 10 extra docs)."
+            "Documents fetched by each search before reranking (default: 20, max: 100). "
+            "More candidates cost reranking time (about 0.8 s per 20 documents on CPU)."
         ),
     )
     final_n: Optional[int] = Field(
         default=None,
         ge=1,
         description=(
-            "Number of documents kept after relevance filtering and passed to the LLM (default: 5). "
-            "Smaller values produce more focused answers; larger values improve coverage."
+            "Number of documents the reader gets after reranking (default: 5). "
+            "On the test questions, 3 to 10 documents gave the same answers within chance."
+        ),
+    )
+    depth: Optional[Literal["fast", "deep"]] = Field(
+        default=None,
+        description=(
+            "How hard to search:\n"
+            "- `fast` *(default)* — two keyword searches per collection, merged and reranked; "
+            "about 3 s for one collection, 6 s for three\n"
+            "- `deep` — also searches written by the language model; about 5 s for one collection, 8 s for three\n"
+            "`depth_used` in each result says what actually ran."
         ),
     )
     include_documents: bool = Field(
@@ -342,21 +453,17 @@ class QuestionRequest(BaseModel):
         default="generative",
         description=(
             "Answer mode:\n"
-            "- `generative` *(default)* — Qwen3-8B generates a fluent answer with inline `[N]` citations\n"
-            "- `extractive` — BioBERT extracts a verbatim span from the best matching document "
+            "- `generative` *(default)* — the language model writes a short answer; `docs` lists "
+            "the documents it cites. When the model is slow or down, the extractive answer is sent "
+            "instead and `notes` says so\n"
+            "- `extractive` — BioBERT copies a span from the best matching document "
             "and returns a confidence score\n"
-            "- `hybrid` *(legacy alias)* — mapped to `generative` + `dense` retrieval"
+            "- `hybrid` *(legacy alias)* — same as `generative`"
         ),
     )
-    retrieval: str = Field(
-        default="sparse",
-        description=(
-            "Retrieval strategy:\n"
-            "- `sparse` *(default)* — SIBILS BM25 keyword search; fast, best for exact terms and acronyms\n"
-            "- `dense` — BM25 + FAISS semantic search fused with RRF, then re-ranked by a cross-encoder; "
-            "better recall for conceptual or paraphrased questions\n"
-            "- `rag` *(legacy alias)* — mapped to `dense`"
-        ),
+    retrieval: Optional[str] = Field(
+        default=None,
+        description="Ignored. Kept so that older clients sending `sparse` or `dense` still work; use `depth`.",
     )
     doc_refs: Optional[List[str]] = Field(
         default=None,
@@ -370,9 +477,7 @@ class QuestionRequest(BaseModel):
     model_config = {"json_schema_extra": {"example": {
         "question": "What causes malaria?",
         "mode": "generative",
-        "retrieval": "dense",
-        "retrieval_n": 20,
-        "final_n": 5,
+        "depth": "fast",
     }}}
 
 
@@ -389,7 +494,10 @@ class DocItem(BaseModel):
     )
     doc_retrieval_score: Optional[float] = Field(
         None,
-        description="Retrieval or reranking relevance score (higher = more relevant to the question).",
+        description=(
+            "The reranker's probability that the document answers the question, 0 to 1 "
+            "(higher = more relevant). Comparable across collections."
+        ),
     )
     doc_text: Optional[str] = Field(
         None,
@@ -420,8 +528,8 @@ class AnswerItem(BaseModel):
         ...,
         description=(
             "The answer text. "
-            "In **generative** mode: a fluent sentence synthesised by the LLM, with inline `[N]` "
-            "markers that correspond to entries in `docs`. "
+            "In **generative** mode: two to four sentences written by the language model; the "
+            "citation markers are removed and the documents it cites are in `docs`. "
             "In **extractive** mode: a verbatim span copied from the source document."
         ),
     )
@@ -455,9 +563,42 @@ class AnswerItem(BaseModel):
         description=(
             "Supporting documents for this answer. "
             "Extractive: exactly one item with `snippet_start`/`snippet_end` offsets. "
-            "Generative: one entry per sentence cited (matching the `[N]` markers in `answer`)."
+            "Generative: the documents the answer cites, in rank order (the top document "
+            "when it cites none)."
         ),
     )
+
+
+class Note(BaseModel):
+    """Something the person reading the answer should know."""
+
+    code: str = Field(
+        ...,
+        description=(
+            "`depth_reduced`: the deep mode's extra searches were skipped (the language model "
+            "was too slow), so the answer comes from the fast search. `extractive_fallback`: "
+            "the language model did not answer in time, so the answer is the extractive one. "
+            "`deep_unavailable`: this server has no deep mode. More codes may come."
+        ),
+    )
+    message: str = Field(..., description="A sentence to show as it is.")
+
+
+_DEPTH_USED = Field(
+    None,
+    description=(
+        "The depth that actually ran: `fast` or `deep`. Lower than asked when the deep "
+        "mode's extra searches were skipped; `notes` then says why. Null with `doc_refs`."
+    ),
+)
+_NOTES = Field(
+    default_factory=list,
+    description="Notes for the person reading the answer, mostly when the service did less than asked. Often empty.",
+)
+_QUERIES_USED = Field(
+    default_factory=list,
+    description="Deep only: the searches the language model wrote and the service kept. Empty for fast.",
+)
 
 
 class CollectionResult(BaseModel):
@@ -483,8 +624,14 @@ class CollectionResult(BaseModel):
     )
     mode_used: Optional[str] = Field(
         None,
-        description="Effective mode after legacy-alias resolution, e.g. `generative` or `extractive`.",
+        description=(
+            "The mode that wrote these answers: `generative` or `extractive`. Extractive "
+            "after a generative request when the language model was slow (see `notes`)."
+        ),
     )
+    depth_used: Optional[str] = _DEPTH_USED
+    notes: List[Note] = _NOTES
+    queries_used: List[str] = _QUERIES_USED
     debug_info: Optional[Dict] = Field(
         None,
         description=(
@@ -517,7 +664,7 @@ class MultiQAResponse(BaseModel):
         ...,
         description=(
             "Short identifier of the model that produced the answers: "
-            "`biobert` for extractive mode, or the generative model name (e.g. `Qwen3-8B-FP8`)."
+            "`biobert` for extractive mode, or the generative model name (e.g. `qwen3.8-27b`)."
         ),
     )
     pipeline_time: Optional[float] = Field(
@@ -556,10 +703,19 @@ class QAResponse(BaseModel):
         ...,
         description="Model used: `biobert` for extractive mode, or short generative model name.",
     )
-    ndocs_requested: int = Field(..., description="Number of documents requested from SIBILS.")
-    ndocs_returned_by_SIBiLS: int = Field(..., description="Number of documents actually returned by SIBILS.")
+    ndocs_requested: int = Field(..., description="Number of documents the reader was to get (`n`, at most 5).")
+    ndocs_returned_by_SIBiLS: int = Field(..., description="Number of different documents the searches returned, before reranking.")
     answers: List[AnswerItem] = Field(..., description="Ranked answer candidates, best first.")
-    mode_used: Optional[str] = Field(None, description="Effective mode after alias resolution.")
+    mode_used: Optional[str] = Field(
+        None,
+        description=(
+            "The mode that wrote the answers: `generative` or `extractive`. Extractive after a "
+            "generative request when the language model was slow (see `notes`)."
+        ),
+    )
+    depth_used: Optional[str] = _DEPTH_USED
+    notes: List[Note] = _NOTES
+    queries_used: List[str] = _QUERIES_USED
     pipeline_time: Optional[float] = Field(None, description="Total pipeline wall-clock time in seconds.")
     transformed_query: None = Field(None, description="Not used (reserved for Elasticsearch-based backends).")
     debug_info: Optional[Dict] = Field(None, description="Internal diagnostics when `debug=true`.")
@@ -625,29 +781,30 @@ def startup_event():
 )
 def health_check():
     """
-    Returns the service status and, once the pipeline is initialised, the names of the
-    loaded models and the inference mode (CPU / GPU).
+    Returns the service status, the commit the code was installed from, and, once the
+    pipeline is initialised, the models it uses.
 
     The `ready` field is `false` during startup (pipeline not yet loaded) and `true`
-    once the first request has triggered pipeline initialisation.
+    once the pipeline is loaded.
     """
     config_info = {}
     if pipeline is not None:
         config_info = {
-            "generative_model": pipeline.config.model_name,
+            "generation_backend": pipeline.config.generation_backend,
+            "generative_model": pipeline.config.generator_label,
             "extractive_model": pipeline.config.qa_model,
-            "inference_mode": "cpu" if pipeline.config.use_cpu else "gpu",
-            "use_vllm": pipeline.config.use_vllm,
+            "reranker_model": pipeline.config.reranker_model,
+            "default_depth": pipeline.config.default_depth,
         }
 
     return {
         "status": "healthy",
+        "commit": _COMMIT,
         "features": {
-            "hybrid_retrieval": True,
+            "depths": ["fast", "deep"],
             "cross_encoder_reranking": True,
-            "relevance_filtering": True,
+            "extractive_fallback": True,
             "sentence_citations": True,
-            "cpu_inference": True,
         },
         "ready": pipeline is not None,
         "config": config_info
@@ -662,50 +819,45 @@ def health_check():
 )
 def retrieval_info():
     """
-    Returns a human-readable description of the hybrid retrieval system: BM25 via SIBILS,
-    dense FAISS search, Reciprocal Rank Fusion, and the cross-encoder reranker.
-
-    Useful for understanding the tradeoffs between `sparse` and `dense` retrieval modes.
+    Describes the two search depths: what each one runs, and what the tests behind them
+    measured.
     """
     return {
-        "hybrid_retrieval": {
-            "description": "Combines SIBILS (BM25) and Dense (FAISS) retrieval",
-            "sibils_bm25": {
-                "description": "Keyword-based search via SIBILS API",
-                "corpus": "10,000+ PMC biomedical papers",
-                "speed": "~1.9s per query",
-                "best_for": "Exact terms, acronyms, technical queries"
+        "depths": {
+            "fast": {
+                "default": True,
+                "searches": [
+                    "the SIBILS query parser's query for the collection (concept annotations, species filter)",
+                    "a plain OR search of the question's words (species filter kept)",
+                ],
+                "candidates_per_search": 20,
+                "ranking": "a cross-encoder scores every candidate against the question as asked; the best five are read",
+                "typical_time": "about 3 s for one collection, 6 s for three at once",
             },
-            "dense_faiss": {
-                "description": "Semantic vector search with local FAISS index",
-                "corpus": "2,398 biomedical documents",
-                "speed": "~0.07s per query (96% faster than SIBILS!)",
-                "best_for": "Semantic meaning, paraphrases, conceptual queries",
-                "model": "sentence-transformers/all-MiniLM-L6-v2"
+            "deep": {
+                "searches": [
+                    "the two searches of fast",
+                    "two searches written by the language model from the question",
+                    "one search on the model's own guess, only when it is sure of it",
+                ],
+                "rules": [
+                    "a model-written search is used only if its first five documents match the question about as well as the plain searches do",
+                    "a document only the guess search found must clearly beat the fifth document",
+                    "the reader never sees the guess or the queries",
+                    "no reply from the model within 3 s: the fast search alone is used, and a note says so",
+                ],
+                "typical_time": "about 5 s for one collection, 8 s for three at once",
             },
-            "fusion": {
-                "method": "Reciprocal Rank Fusion (RRF)",
-                "execution": "Parallel (both run simultaneously)",
-                "result": "Best documents from both sources combined"
-            },
-            "smart_strategy": {
-                "technical_query": "Uses SIBILS only (e.g., 'What is AG1-IA?')",
-                "semantic_query": "Uses Dense only - 96% faster! (e.g., 'How does immune system work?')",
-                "general_query": "Uses both in parallel (e.g., 'What causes malaria?')"
-            }
         },
-        "why_still_use_sibils": [
-            "SIBILS has 10,000+ papers (vs 2,398 in local index)",
-            "Best for exact medical terms and acronyms",
-            "Complements semantic search for comprehensive coverage",
-            "Running in parallel means no added time cost"
-        ],
-        "example": {
-            "query": "How does the immune system fight viral infections?",
-            "sibils_finds": "Papers with 'immune system', 'viral infections'",
-            "dense_finds": "Papers about 'host defense', 'antiviral response' (semantic)",
-            "combined": "Best coverage from both approaches"
-        }
+        "measured": (
+            "258 test questions on Medline, run through this service on 26 November 2026: the right "
+            "document was among the five for 75 of 256 questions with fast against 41 with the former "
+            "single search, and the answer text for 203 of 258 against 147. The generated answer held "
+            "the expected one for 164 questions with fast and 168 with deep (8 gained, 4 lost: could "
+            "be chance). Medians with nothing cached: fast 3.1 s for one collection and 5.6 s for "
+            "three at once, deep 5.1 s and 8.4 s; the reranker, on the CPU, is the slowest step."
+        ),
+        "retrieval_parameter": "`retrieval` (sparse, dense) is accepted and ignored; use `depth`.",
     }
 
 
@@ -722,6 +874,7 @@ def _run_doc_refs_qa(
     mode: str,
     debug: bool = False,
     include_documents: bool = False,
+    batch: bool = False,
 ) -> dict:
     """Resolve doc_refs to Documents, run QA, return a MultiQAResponse-shaped dict."""
     import time as _t
@@ -749,39 +902,54 @@ def _run_doc_refs_qa(
     for doc in docs:
         by_col[doc.source].append(doc)
 
-    collection_results = []
-    for col, col_docs in sorted(by_col.items()):
+    def read_one(group):
+        col, col_docs = group
         result = p.run_with_documents(
             question=question,
             documents=col_docs,
             mode=mode,
             return_documents=include_documents,
             debug=debug,
+            batch=batch,
         )
-        collection_results.append({
+        return {
             "collection": col,
             "answers": result.get("answers", []),
             "mode_used": result.get("mode_used"),
+            "depth_used": None,
+            "notes": result.get("notes", []),
             "debug_info": result.get("debug_info") if debug else None,
-        })
+        }
+
+    # The collections are read at the same time, as in run_multi_collection: the shared
+    # language-model server batches requests that arrive together, so three collections
+    # cost about one answer's time instead of three in a row.
+    from concurrent.futures import ThreadPoolExecutor
+    groups = sorted(by_col.items())
+    with ThreadPoolExecutor(max_workers=min(3, len(groups))) as pool:
+        collection_results = list(pool.map(read_one, groups))
     # Rank by the answers, not alphabetically: with sorted() Medline came first whenever
     # present, and its "not stated" displaced the value a Plazi treatment gave (D10.3 P19).
     from .answer_signals import rank_collection_results
     collection_results = rank_collection_results(question, collection_results, use_scores=True)
 
-    model_name = (
-        "biobert" if mode == "extractive"
-        else p.config.model_name.split("/")[-1]
-    )
+    # What answered, not what was asked: the language model the configuration uses (the
+    # shared server's, not a local model name), or BioBERT when the reply fell back to it.
+    mode_used = collection_results[0]["mode_used"] or mode
     return {
         "question": question,
         "collection_results": collection_results,
-        "mode_used": mode,
+        "mode_used": mode_used,
         "ndocs_retrieved": len(docs),
-        "model": model_name,
+        "model": RAGPipeline._model_label(mode_used, p.config.generator_label),
         "pipeline_time": round(_t.time() - t0, 3),
         "unresolved_refs": unresolved if unresolved else None,
     }
+
+
+def _public(result: dict) -> dict:
+    """The response without the pipeline's internal keys (timings for the log)."""
+    return {k: v for k, v in result.items() if not k.startswith("_")}
 
 
 def _clamp_retrieval_n(n: Optional[int]) -> Optional[int]:
@@ -790,14 +958,10 @@ def _clamp_retrieval_n(n: Optional[int]) -> Optional[int]:
     return max(1, min(n, _MAX_RETRIEVAL_N))
 
 
-def _resolve_mode(mode: str, retrieval: str) -> tuple[str, str]:
-    """Normalise mode/retrieval values; map legacy names to current ones."""
-    # Legacy mode aliases
-    if mode == "hybrid":
-        return "generative", "dense"
-    # Legacy retrieval aliases
-    if retrieval == "rag":
-        retrieval = "dense"
+def _resolve_mode(mode: str, retrieval: Optional[str]) -> tuple[str, Optional[str]]:
+    """Normalise the mode; `retrieval` is passed through and ignored by the pipeline."""
+    if mode == "hybrid":  # legacy alias
+        return "generative", retrieval
     return mode, retrieval
 
 
@@ -810,8 +974,12 @@ def _run_qa(
     debug: bool = False,
     retrieval_n: Optional[int] = None,
     final_n: Optional[int] = None,
+    depth: Optional[str] = None,
 ) -> QAResponse:
-    """Shared logic for both POST /qa and GET /QA."""
+    """Shared logic for GET /QA: one collection (or all configured ones, merged).
+
+    `n` is how many documents the reader gets, at most the configured final_n (5).
+    """
     from .retrieval.sibils_retriever import SIBILSRetriever
     if col is not None and col not in SIBILSRetriever.VALID_COLLECTIONS:
         return QAResponse(
@@ -823,18 +991,28 @@ def _run_qa(
 
     try:
         p = get_pipeline()
+        if final_n is None and n:
+            final_n = max(1, min(n, p.config.final_n))
         result = p.run(
             question=question,
-            retrieval_n=retrieval_n or n,
+            retrieval_n=retrieval_n,
             final_n=final_n,
             collection=col,
             return_documents=include_documents,
             debug=debug,
             mode=mode,
+            depth=depth,
         )
-        return QAResponse(**result)
+        _log_request("GET /QA", collection=col, mode=mode, mode_used=result.get("mode_used"),
+                     depth=depth or p.config.default_depth, depth_used=result.get("depth_used"),
+                     notes=[nt["code"] for nt in result.get("notes", [])],
+                     n_answers=len(result.get("answers", [])), seconds=result.get("pipeline_time"),
+                     timings=result.get("_timings"), success=True)
+        return QAResponse(**_public(result))
     except Exception as e:
         logger.exception("Pipeline error")
+        _log_request("GET /QA", collection=col, mode=mode, depth=depth, success=False,
+                     error=type(e).__name__)
         return QAResponse(
             sibils_version="biomoqa-2.0", success=False, error=str(e),
             question=question, collection=col or "medline+plazi", model="",
@@ -853,31 +1031,38 @@ def _run_qa(
     response_model=MultiQAResponse,
     response_description="Answers from all three collections, ranked by relevance",
 )
-def answer_question_post(request: QuestionRequest):
+def answer_question_post(request: QuestionRequest, http_request: Request):
     """
     **Main QA endpoint.** Answers a biomedical question by querying all three literature
     collections (MEDLINE, PMC, Plazi) and returning results ranked by relevance.
 
     ### How it works
 
-    1. Documents are retrieved from SIBILS (BM25) and optionally from the local FAISS
-       index, depending on the `retrieval` strategy.
-    2. Retrieved documents are reranked by a cross-encoder and filtered by relevance.
-    3. The top documents are passed to either Qwen3-8B (generative) or BioBERT (extractive).
+    1. Each collection is searched at the `depth` asked (`fast` by default).
+    2. A cross-encoder scores every candidate against the question; the best five are kept.
+    3. The five are read by the language model (generative) or BioBERT (extractive).
     4. Results from all three collections are returned in a single response, sorted so
        the most relevant collection appears first (`rank=1`).
 
     ### Caching
 
-    Identical requests (same question, mode, and retrieval parameters) within a 120-second
-    window are served from cache. This avoids redundant LLM calls when the frontend polls
-    multiple collection tabs simultaneously.
+    Identical requests (same question, mode, depth and sizes) within a 120-second window
+    are served from cache; an answer given with a fallback note is kept only 10 seconds.
+
+    ### Batch jobs
+
+    A POST that does not come from a web browser (a script) is a batch job, recognised
+    automatically: its answers are written at low priority on the shared language-model
+    server and may take up to about 100 s. If the model still does not answer, the
+    response carries `error` and no answers, never BioBERT's span in place of the
+    generated answer. Requests from a browser keep the 4-second fallback.
 
     ### Direct-document QA
 
     Set `doc_refs` to a list of PMIDs, PMCIDs, or DOIs to bypass retrieval entirely and
     run QA on specific documents. Unresolved references are reported in `unresolved_refs`.
     """
+    batch = _is_batch(http_request)
     try:
         mode, retrieval = _resolve_mode(request.mode, request.retrieval)
         if request.doc_refs:
@@ -887,7 +1072,9 @@ def answer_question_post(request: QuestionRequest):
                 mode=mode,
                 debug=request.debug,
                 include_documents=request.include_documents,
+                batch=batch,
             )
+            _log_doc_refs("POST /qa", mode, batch, result)
             return MultiQAResponse(**result)
         p = get_pipeline()
         result = _get_or_run_multi(
@@ -898,10 +1085,18 @@ def answer_question_post(request: QuestionRequest):
             retrieval_n=_clamp_retrieval_n(request.retrieval_n),
             final_n=request.final_n,
             debug=request.debug,
+            depth=request.depth,
+            batch=batch,
         )
-        return MultiQAResponse(**result)
+        _log_request("POST /qa", mode=mode, batch=batch, mode_used=result.get("mode_used"),
+                     depth=request.depth or p.config.default_depth, depth_used=result.get("_depth_used"),
+                     notes=result.get("_notes"), n_collections=len(result.get("collection_results", [])),
+                     seconds=result.get("pipeline_time"), timings=result.get("_timings"), success=True)
+        return MultiQAResponse(**_public(result))
     except Exception as e:
         logger.exception("Pipeline error in /qa")
+        _log_request("POST /qa", mode=request.mode, batch=batch, depth=request.depth, success=False,
+                     error=type(e).__name__)
         # Report the failure. Returning an empty result with no error made a broken
         # request indistinguishable from a question with no matching literature, which
         # is how 102 deterministic failures went unexplained in the D10.3 evaluation.
@@ -923,7 +1118,7 @@ def answer_question_post(request: QuestionRequest):
     response_model=MultiQAResponse,
     response_description="Answers from all three collections, ranked by relevance",
 )
-def answer_question_multi(request: QuestionRequest):
+def answer_question_multi(request: QuestionRequest, http_request: Request):
     """
     Identical to `POST /qa` but always runs the full multi-collection pipeline without
     the shared cache. Use this endpoint when you need a fresh result, or for direct
@@ -933,8 +1128,10 @@ def answer_question_multi(request: QuestionRequest):
     pipeline run (including a separate vLLM generation). For most use cases, `POST /qa`
     is preferred.
 
-    Supports `doc_refs` for direct-document QA in the same way as `POST /qa`.
+    Supports `doc_refs` for direct-document QA in the same way as `POST /qa`, and treats
+    a script's request as a batch job in the same way.
     """
+    batch = _is_batch(http_request)
     try:
         mode, retrieval = _resolve_mode(request.mode, request.retrieval)
         if request.doc_refs:
@@ -944,7 +1141,9 @@ def answer_question_multi(request: QuestionRequest):
                 mode=mode,
                 debug=request.debug,
                 include_documents=request.include_documents,
+                batch=batch,
             )
+            _log_doc_refs("POST /qa/multi", mode, batch, result)
             return MultiQAResponse(**result)
         p = get_pipeline()
         result = p.run_multi_collection(
@@ -954,10 +1153,18 @@ def answer_question_multi(request: QuestionRequest):
             mode=mode,
             retrieval=retrieval,
             debug=request.debug,
+            depth=request.depth,
+            batch=batch,
         )
-        return MultiQAResponse(**result)
+        _log_request("POST /qa/multi", mode=mode, batch=batch, mode_used=result.get("mode_used"),
+                     depth=request.depth or p.config.default_depth, depth_used=result.get("_depth_used"),
+                     notes=result.get("_notes"), n_collections=len(result.get("collection_results", [])),
+                     seconds=result.get("pipeline_time"), timings=result.get("_timings"), success=True)
+        return MultiQAResponse(**_public(result))
     except Exception as e:
         logger.exception("Pipeline error in /qa/multi")
+        _log_request("POST /qa/multi", mode=request.mode, batch=batch, depth=request.depth, success=False,
+                     error=type(e).__name__)
         return MultiQAResponse(
             question=request.question,
             collection_results=[],
@@ -965,6 +1172,7 @@ def answer_question_multi(request: QuestionRequest):
             ndocs_retrieved=0,
             model="",
             pipeline_time=None,
+            error=f"{type(e).__name__}: {e}",
         )
 
 
@@ -987,16 +1195,28 @@ def answer_question_get(
     n: Optional[int] = Query(
         default=None,
         description=(
-            "Number of documents to retrieve from SIBILS (default: 10). "
-            "Higher values improve recall but increase latency."
+            "Number of documents the reader gets and the response cites, at most 5 (default: 5)."
         ),
     ),
     mode: str = Query(
         default="extractive",
         description=(
-            'Answer mode: `"extractive"` (BioBERT span, default) or `"generative"` (Qwen3-8B). '
-            '`"hybrid"` is a legacy alias for `generative` + dense retrieval.'
+            'Answer mode: `"extractive"` (BioBERT span, default) or `"generative"` (the language '
+            'model). When the model is slow or down, a generative request gets the extractive '
+            'answer, with `mode_used: "extractive"` and a note. `"hybrid"` = `generative`.'
         ),
+    ),
+    depth: Optional[Literal["fast", "deep"]] = Query(
+        default=None,
+        description=(
+            '`"fast"` (default, about 3 s): two keyword searches, merged and reranked. '
+            '`"deep"` (about 5 s): also searches written by the language model. '
+            '`depth_used` says what ran.'
+        ),
+    ),
+    retrieval: Optional[str] = Query(
+        default=None,
+        description="Ignored. Kept so that older clients sending `sparse` or `dense` still work; use `depth`.",
     ),
 ):
     """
@@ -1007,10 +1227,10 @@ def answer_question_get(
 
     **Example:**
     ```
-    GET /api/QA?col=medline&q=What+causes+malaria%3F&n=5&mode=generative
+    GET /api/QA?col=medline&q=What+causes+malaria%3F&n=5&mode=generative&depth=fast
     ```
     """
-    return _run_qa(question=q, col=col, n=n, mode=mode)
+    return _run_qa(question=q, col=col, n=n, mode=mode, depth=depth)
 
 
 # ---------------------------------------------------------------------------
@@ -1067,22 +1287,25 @@ def answer_batch(request: BatchRequest):
     """
     Answers multiple questions in a single request.
 
-    Retrieval (SIBILS + FAISS) runs concurrently across all questions using a thread pool,
+    Searches (fast depth) run concurrently across all questions using a thread pool,
     which significantly reduces wall-clock time compared to sequential calls.
     Generation is sequential (one vLLM call per question).
 
     Results are returned in the same order as the input `questions` list.
 
-    **Tip:** This endpoint always uses extractive mode for speed. For generative answers
-    over a list of questions, call `POST /qa` once per question.
+    **Tip:** This endpoint always uses extractive mode and the fast depth. For generative
+    answers over a list of questions, call `POST /qa` once per question.
     """
     p = get_pipeline()
+    t0 = _time.time()
     results = p.run_batch(
         questions=request.questions,
         retrieval_n=request.retrieval_n,
         final_n=request.final_n,
         collection=request.col,
     )
+    _log_request("POST /batch", collection=request.col, mode="extractive", depth="fast",
+                 n_questions=len(results), seconds=round(_time.time() - t0, 3), success=True)
     return {"results": results, "count": len(results)}
 
 

@@ -1,5 +1,5 @@
 """
-Evaluate retrieval quality: SIBILS (BM25-only) vs RAG (FAISS+BM25+reranker).
+Evaluate retrieval quality: the fast search depth against the deep one.
 
 Metrics per retrieval strategy:
   context_recall  — does any retrieved doc contain the gold answer string?
@@ -92,13 +92,7 @@ def run_one(question: str, retrieval: str, collection=None) -> dict:
     cfg = p.config
     t0 = time.time()
 
-    docs, _ = p._retrieve_and_prepare(
-        question,
-        retrieval_n=cfg.retrieval_n,
-        final_n=cfg.final_n,
-        collection=collection,
-        retrieval=retrieval,
-    )
+    docs, _, _ = p._retrieve(question, collection, retrieval, cfg.final_n)
 
     answer = ""
     if docs:
@@ -157,7 +151,7 @@ def main():
     print(f"Collection filter: {collection or 'all (medline+plazi+pmc)'}")
     print("=" * 70)
 
-    strategies = ["sibils", "rag"]
+    strategies = ["fast", "deep"]
     totals = {s: {"ctx_recall": 0, "answered": 0, "f1": 0.0, "rouge1": 0.0,
                   "ndocs": 0, "time": 0.0,
                   "sources": defaultdict(int), "overlap_count": 0}
@@ -165,14 +159,14 @@ def main():
 
     fieldnames = [
         "qid", "question", "golden_answer",
-        "sibils_answer", "rag_answer",
-        "sibils_ctx_recall", "rag_ctx_recall",
-        "sibils_f1", "rag_f1",
-        "sibils_ndocs", "rag_ndocs",
-        "sibils_time", "rag_time",
+        "fast_answer", "deep_answer",
+        "fast_ctx_recall", "deep_ctx_recall",
+        "fast_f1", "deep_f1",
+        "fast_ndocs", "deep_ndocs",
+        "fast_time", "deep_time",
         "docid_overlap",          # number of docids shared between both strategies
-        "sibils_sources",         # e.g. "medline:3,plazi:1,pmc:1"
-        "rag_sources",
+        "fast_sources",         # e.g. "medline:3,plazi:1,pmc:1"
+        "deep_sources",
     ]
 
     all_results = []
@@ -208,8 +202,8 @@ def main():
                         out.add(getattr(d, "doc_id", None) or "")
                 return out
 
-            sibils_ids = docids(results["sibils"]["docs"])
-            rag_ids = docids(results["rag"]["docs"])
+            sibils_ids = docids(results["fast"]["docs"])
+            rag_ids = docids(results["deep"]["docs"])
             overlap = len(sibils_ids & rag_ids)
 
             record = {"qid": qid, "question": question, "golden_answer": gold}
@@ -244,7 +238,7 @@ def main():
             writer.writerow(record)
             f.flush()
 
-            print(f"  F1: sibils={record['sibils_f1']:.3f}  rag={record['rag_f1']:.3f}  overlap={overlap}/{min(len(sibils_ids), len(rag_ids))}")
+            print(f"  F1: fast={record['fast_f1']:.3f}  deep={record['deep_f1']:.3f}  overlap={overlap}/{min(len(sibils_ids), len(rag_ids))}")
 
     # ── Summary ──────────────────────────────────────────────
     print("\n" + "=" * 70)
@@ -271,21 +265,21 @@ def main():
     summary = {
         "n_questions": n,
         "collection_filter": collection,
-        "sibils": {
-            "context_recall_pct": round(totals["sibils"]["ctx_recall"] / n * 100, 1),
-            "answer_rate_pct": round(totals["sibils"]["answered"] / n * 100, 1),
-            "f1": round(totals["sibils"]["f1"] / n, 4),
-            "avg_ndocs": round(totals["sibils"]["ndocs"] / n, 1),
-            "avg_time": round(totals["sibils"]["time"] / n, 2),
-            "source_distribution": dict(totals["sibils"]["sources"]),
+        "fast": {
+            "context_recall_pct": round(totals["fast"]["ctx_recall"] / n * 100, 1),
+            "answer_rate_pct": round(totals["fast"]["answered"] / n * 100, 1),
+            "f1": round(totals["fast"]["f1"] / n, 4),
+            "avg_ndocs": round(totals["fast"]["ndocs"] / n, 1),
+            "avg_time": round(totals["fast"]["time"] / n, 2),
+            "source_distribution": dict(totals["fast"]["sources"]),
         },
-        "rag": {
-            "context_recall_pct": round(totals["rag"]["ctx_recall"] / n * 100, 1),
-            "answer_rate_pct": round(totals["rag"]["answered"] / n * 100, 1),
-            "f1": round(totals["rag"]["f1"] / n, 4),
-            "avg_ndocs": round(totals["rag"]["ndocs"] / n, 1),
-            "avg_time": round(totals["rag"]["time"] / n, 2),
-            "source_distribution": dict(totals["rag"]["sources"]),
+        "deep": {
+            "context_recall_pct": round(totals["deep"]["ctx_recall"] / n * 100, 1),
+            "answer_rate_pct": round(totals["deep"]["answered"] / n * 100, 1),
+            "f1": round(totals["deep"]["f1"] / n, 4),
+            "avg_ndocs": round(totals["deep"]["ndocs"] / n, 1),
+            "avg_time": round(totals["deep"]["time"] / n, 2),
+            "source_distribution": dict(totals["deep"]["sources"]),
         },
     }
     summary_path = output_path.with_suffix(".json")

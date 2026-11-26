@@ -1,17 +1,23 @@
 """
-BioMoQA RAG Pipeline for biomedical question answering.
+BioMoQA RAG pipeline for biomedical question answering.
 
-Features:
-- Hybrid retrieval (SIBILS + FAISS dense search)
-- Cross-encoder reranking
-- vLLM generation with sentence-level citations
+For one question and one collection:
+1. Search, at the depth asked (depth.py): fast runs two keyword searches and keeps the
+   five documents a cross-encoder scores best against the question; deep adds searches
+   written by the language model.
+2. Read the five: the language model writes a short answer citing them (generative), or
+   BioBERT copies the best span (extractive). When the language model is slow or down,
+   the extractive answer is sent instead, and the response says so.
 """
 
-from dataclasses import dataclass
-from typing import List, Dict, Optional
+import logging
+import math
 import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional
 
-# vLLM import (for GPU inference)
+# vLLM import (for in-process GPU inference)
 try:
     from vllm import LLM, SamplingParams
     VLLM_AVAILABLE = True
@@ -29,12 +35,20 @@ except ImportError:
 PIPELINE_VERSION = "biomoqa-2.0"
 
 from .retrieval.sibils_retriever import SIBILSRetriever
-from .retrieval.dense_retriever import DenseRetriever
-from .retrieval.parallel_hybrid import ParallelHybridRetriever, SmartHybridRetriever
 from .retrieval.reranker import SemanticReranker
-from .retrieval.relevance_filter import FastRelevanceFilter
 from .passage import best_passage
 from .answer_signals import annotate, mean_token_probability, rank_collection_results
+from .depth import (
+    DEFAULT_DEPTH, DEPTHS, DepthSettings, SubQueryWriter, merge, note, select, sigmoid,
+)
+from .llm_remote import LLMUnavailable, RemoteLLM
+
+logger = logging.getLogger("biomoqa")
+
+# The assistant turn is pre-filled with this English phrase: the model continues the
+# sentence, which anchors the answer in English and keeps it from thinking first.
+ANSWER_PREFIX = "Based on the provided documents, "
+ANSWER_STOP = ["\nQuestion:", "\nNote:", "\nReferences:", "\nSources:"]
 
 
 class GeneratedText(str):
@@ -57,43 +71,60 @@ _HABITAT_Q = _re.compile(
     r"\bhabitats?\b|\bwhere (?:does|do|is|are|can)\b.*\b(?:live|found|occur|inhabit)\w*"
     r"|\binhabit\w*\b|\becolog\w*\b", _re.I)
 
+# Citation markers: [N] or [N, M]. A run of them ("[1], [2]") goes with the space before it,
+# so the answer keeps no " , ." and no space before its full stop. "[18F]altanserin" is no marker.
+_MARKER = r"\[\d+(?:\s*,\s*\d+)*\]"
+_MARKER_RUN = _re.compile(rf"\s*{_MARKER}(?:\s*,?\s*{_MARKER})*")
+
 
 @dataclass
 class RAGConfig:
     """Configuration for the RAG pipeline"""
     # Retrieval
-    retrieval_n: int = 30
-    use_smart_retrieval: bool = True
-    hybrid_alpha: float = 0.5
-    sibils_collections: List = None  # None = SIBILS default (medline + plazi)
+    retrieval_n: int = 20             # documents per search; the depth pipeline merges the lists
+    sibils_collections: List = None   # None = SIBILS default (medline + plazi)
+    default_depth: str = DEFAULT_DEPTH
+    depth: DepthSettings = field(default_factory=DepthSettings)
 
-    # Processing (streamlined)
-    use_reranking: bool = True
+    # Reranking (every candidate is scored against the question as asked)
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-12-v2"
-    rerank_n: int = 15
-    use_relevance_filter: bool = True
+    reranker_device: str = "cpu"
     final_n: int = 5
-    min_extractive_score: float = 0.30  # fallback to generative if BioBERT is less confident
+    min_extractive_score: float = 0.30  # run_batch drops extractive answers below this
 
-    # Generation (optimized)
-    model_name: str = "Qwen/Qwen3-8B"  # Qwen3-8B (~8GB VRAM with fp8)
+    # Generation: "remote" = the shared language-model server; "vllm" = a model loaded
+    # in this process on the GPU; "cpu" = transformers on the CPU.
+    generation_backend: str = "remote"
+    llm_base_url: str = "http://llm.lan.text-analytics.ch/qwen/v1"
+    llm_model: str = "Qwen3.8-27B"
+    llm_first_token_timeout: float = 4.0
+    llm_total_timeout: float = 20.0
+    llm_priority: int = -10
+    # Batch jobs (a POST that does not come from a web browser): low priority on the shared
+    # server, long limits, and never BioBERT's answer in place of the generated one.
+    llm_batch_priority: int = 10
+    llm_batch_first_token_timeout: float = 60.0
+    llm_batch_total_timeout: float = 100.0
+
+    # In-process generation (generation_backend "vllm" or "cpu")
+    model_name: str = "Qwen/Qwen3-8B"
     use_vllm: bool = True
-    use_cpu: bool = False  # Use CPU inference with transformers instead of vLLM
-    quantization: Optional[str] = "fp8"  # FP8 quantization (GPU only)
+    use_cpu: bool = False
+    quantization: Optional[str] = "fp8"
     gpu_memory_utilization: float = 0.83
     max_model_len: int = 4096
-    max_tokens: int = 384
-    temperature: float = 0.1
+    max_tokens: int = 300
+    temperature: float = 0.2
 
-    # Context optimization
-    max_abstract_length: int = 800  # ~200 words — used by BioBERT extractive QA
-    llm_abstract_length: int = 600  # shorter cap for LLM prompt to stay within max_model_len=4096
+    # Context
+    max_abstract_length: int = 800    # BioBERT (the extractive reader reads up to 8,000 characters whole)
+    llm_abstract_length: int = 600    # window the language model gets from a long document
+    llm_whole_upto: int = 2500        # documents up to this length are given whole
     truncate_abstracts: bool = True
 
-    # Extractive QA (optional mode — lazy-loaded on first use)
+    # Extractive QA (lazy-loaded on first use)
     qa_model: str = "ktrapeznikov/biobert_v1.1_pubmed_squad_v2"
-    dense_model: str = "pritamdeka/S-PubMedBert-MS-MARCO"
-    qa_confidence_threshold: float = 0.01  # Lowered from 0.1 — BioBERT is conservative
+    qa_confidence_threshold: float = 0.01
     qa_device: int = 0  # 0 = GPU, -1 = CPU
 
     # SIBILS disk cache
@@ -102,9 +133,17 @@ class RAGConfig:
     sibils_empty_cache_ttl: int = 0  # never serve empty results from cache
     sibils_enforce_taxon_phrase: bool = True  # require recognised binomials as a phrase
 
-    # Performance
-    enable_parallel: bool = True
     timeout: float = 30.0
+
+    def __post_init__(self):
+        if self.generation_backend != "vllm":
+            self.use_vllm = False
+        if self.generation_backend == "cpu":
+            self.use_cpu = True
+
+    @property
+    def generator_label(self) -> str:
+        return self.llm_model if self.generation_backend == "remote" else self.model_name
 
     @classmethod
     def cpu_config(cls, model_size: str = "3b") -> "RAGConfig":
@@ -120,9 +159,8 @@ class RAGConfig:
             "7b": "Qwen/Qwen2.5-7B-Instruct",
         }
         return cls(
+            generation_backend="cpu",
             model_name=model_map.get(model_size, model_map["3b"]),
-            use_vllm=False,
-            use_cpu=True,
             quantization=None,
             max_tokens=256,  # Reduced for CPU
             final_n=5,  # Fewer docs for faster processing
@@ -132,9 +170,8 @@ class RAGConfig:
     def gpu_small_config(cls) -> "RAGConfig":
         """Create a GPU configuration with a smaller model (requires ~4GB VRAM)."""
         return cls(
+            generation_backend="vllm",
             model_name="Qwen/Qwen2.5-3B-Instruct",
-            use_vllm=True,
-            use_cpu=False,
             quantization="fp8",
             gpu_memory_utilization=0.83,
             max_tokens=384,
@@ -143,12 +180,8 @@ class RAGConfig:
 
 class RAGPipeline:
     """
-    BioMoQA RAG Pipeline for biomedical question answering.
-
-    Features:
-    - Hybrid retrieval combining SIBILS BM25 and FAISS dense search
-    - Cross-encoder reranking for improved relevance
-    - vLLM generation with sentence-level citations
+    BioMoQA RAG pipeline: depth search, cross-encoder reranking, and a generative
+    (language model) or extractive (BioBERT) reader.
     """
 
     def __init__(self, config: RAGConfig = None):
@@ -160,11 +193,10 @@ class RAGPipeline:
         print("="*80)
         print()
         print("Configuration:")
-        if self.config.quantization:
-            print(f"  ✓ Quantization: {self.config.quantization}")
+        print(f"  ✓ Generation: {self.config.generation_backend} ({self.config.generator_label})")
+        print(f"  ✓ Default depth: {self.config.default_depth}")
         print(f"  ✓ Max tokens: {self.config.max_tokens}")
         print(f"  ✓ Context docs: {self.config.final_n}")
-        print(f"  ✓ Truncate abstracts: {self.config.truncate_abstracts}")
         print()
 
         # Load retrievers
@@ -176,33 +208,35 @@ class RAGPipeline:
             empty_cache_ttl=self.config.sibils_empty_cache_ttl,
             enforce_taxon_phrase=self.config.sibils_enforce_taxon_phrase,
         )
-
-        # ── SIBILS-only retriever (for extractive mode) ──────────────────
+        # Kept for callers of the old attribute names (doc_resolver, eval scripts).
         self.sibils_retriever = self.sibils
-        print("✓ Using SIBILS BM25 retriever (extractive)")
+        self.retriever = self.sibils
+        print("✓ SIBILS retriever")
 
-        # ── RAG retriever (for generative mode): FAISS + BM25 + reranker ─
-        self.dense = DenseRetriever(model_name=self.config.dense_model)
-        self.dense.load("data/faiss_index.bin", "data/documents.pkl")
-        self.rag_retriever = SmartHybridRetriever(
-            self.sibils, self.dense, alpha=0.5, k=60
-        )
-        print("✓ Using SmartHybridRetriever (RAG/generative)")
-
-        # Keep self.retriever pointing to SIBILS for backwards-compat
-        self.retriever = self.sibils_retriever
-
-        # Reranker and relevance filter — always instantiated (used in RAG retrieval path)
-        self.reranker = SemanticReranker(model_name=self.config.reranker_model)
+        self.reranker = SemanticReranker(
+            model_name=self.config.reranker_model, device=self.config.reranker_device)
         print("✓ Loaded reranker")
-        self.relevance_filter = FastRelevanceFilter(min_overlap=0.15)
-        print("✓ Loaded relevance filter")
 
-        # Load LLM (vLLM for GPU or transformers for CPU)
+        # Language model
         self.llm = None
         self.tokenizer = None
+        self.remote: Optional[RemoteLLM] = None
+        self.subqueries: Optional[SubQueryWriter] = None
 
-        if self.config.use_cpu:
+        if self.config.generation_backend == "remote":
+            self.remote = RemoteLLM(
+                base_url=self.config.llm_base_url,
+                model=self.config.llm_model,
+                first_token_timeout=self.config.llm_first_token_timeout,
+                total_timeout=self.config.llm_total_timeout,
+                priority=self.config.llm_priority,
+            )
+            # The deep mode's searches are written by the same server.
+            self.subqueries = SubQueryWriter(self.remote.chat, self.config.depth,
+                                             batch_priority=self.config.llm_batch_priority)
+            print(f"✓ Generation through the shared server: {self.config.llm_model}")
+
+        elif self.config.use_cpu:
             # CPU inference with transformers
             if not TRANSFORMERS_AVAILABLE:
                 raise ImportError("transformers is required for CPU inference. Install with: pip install transformers torch")
@@ -254,8 +288,8 @@ class RAGPipeline:
             # is the only approach that works regardless of vLLM version.
             if not TRANSFORMERS_AVAILABLE:
                 raise ImportError("transformers is required for prompt formatting. Install with: pip install transformers")
-            from transformers import AutoTokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(
+            from transformers import AutoTokenizer as _AutoTokenizer
+            self.tokenizer = _AutoTokenizer.from_pretrained(
                 self.config.model_name, trust_remote_code=True
             )
             print("✓ Tokenizer loaded for prompt formatting (enable_thinking=False)")
@@ -290,7 +324,6 @@ class RAGPipeline:
         - pmc      → PMCID (e.g. PMC7824598)
         - plazi    → Plazi treatment hex ID (the _id from elasticsearch)
         - suppdata → full filename ID (e.g. PMC9700495_zr-43-977-S1.pdf)
-        - faiss    → PMID if available, else PMCID
         """
         source = getattr(doc, 'source', None)
         doc_id = getattr(doc, 'doc_id', None)
@@ -306,7 +339,7 @@ class RAGPipeline:
         if source == 'plazi':
             return doc_id
 
-        # medline / faiss: prefer pmid
+        # medline: prefer pmid
         pmid = getattr(doc, 'pmid', None)
         if pmid:
             return str(pmid)
@@ -324,83 +357,141 @@ class RAGPipeline:
             return "biobert"
         return model_name.split("/")[-1].lower()
 
-    def _retrieve_and_prepare(
-        self,
-        question: str,
-        retrieval_n: int,
-        final_n: int,
-        collection: Optional[str],
-        retrieval: str = "sparse",
-    ):
-        """Steps 1-4: retrieval → reranking → filtering → score normalization.
+    # ------------------------------------------------------------------
+    # Search at the depth asked
+    # ------------------------------------------------------------------
 
-        Thread-safe (no GPU, only SIBILS HTTP + FAISS + CPU CrossEncoder).
-        Returns (documents, num_retrieved).
+    def resolve_depth(self, depth: Optional[str]) -> str:
+        if not depth:
+            return self.config.default_depth
+        if depth not in DEPTHS:
+            raise ValueError(f"Unknown depth '{depth}'. Valid: {', '.join(DEPTHS)}")
+        return depth
+
+    @staticmethod
+    def _is_prose(doc) -> bool:
+        """False for documents no reader can use: empty Plazi treatments, and "abstracts"
+        that are CSV or tabular data (bibliography spreadsheets score high on BM25)."""
+        text = ((doc.title or '') + ' ' + (doc.abstract or ''))[:500]
+        if len(text.strip()) < 20:
+            return False
+        letters = sum(1 for c in text if c.isalpha())
+        commas = text.count(',') + text.count('\t')
+        if letters > 0 and commas / letters > 0.15:
+            return False
+        return True
+
+    def _retrieve_collection(self, question: str, collection: str, depth: str, final_n: int,
+                             candidates_n: Optional[int] = None, batch: bool = False):
+        """The documents one collection gives the reader, best first.
+
+        Returns (documents, number of candidates, info) where info holds depth_used,
+        notes, queries_used and timings.
         """
-        if retrieval == "dense":
-            documents = self.rag_retriever.retrieve(
-                question, n=retrieval_n, top_k=retrieval_n, collection=collection
-            )
-        else:
-            documents = self.sibils_retriever.retrieve(
-                question, n=retrieval_n, collection=collection
-            )
-        num_retrieved = len(documents)
+        s = self.config.depth
+        n = candidates_n or s.candidates_per_search
+        t0 = time.perf_counter()
+        info: Dict = {"depth_used": "fast", "notes": [], "queries_used": [], "timings": {}}
+        timings = info["timings"]
+        extra, guess_docs = [], None
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            sub_future = None
+            if depth == "deep" and self.subqueries is not None:
+                # Written once per question and shared with the other collections' calls.
+                sub_future = pool.submit(self.subqueries.get, question, batch)
+            parsed = self.sibils.parse(question, collection)
+            taxa = parsed[1]
+            timings["parse"] = round(time.perf_counter() - t0, 3)
+            f_today = pool.submit(self.sibils.today_list, question, collection, n, parsed)
+            f_plain = pool.submit(self.sibils.plain_search, question, collection, n, taxa)
+            lists, errors = [], []
+            for f in (f_today, f_plain):
+                try:
+                    lists.append(f.result())
+                except Exception as e:
+                    logger.warning("a %s search failed: %s", collection, e)
+                    lists.append([])
+                    errors.append(e)
+            if len(errors) == 2:
+                raise errors[0]
+            timings["search"] = round(time.perf_counter() - t0, 3)
 
-        if retrieval == "dense":
-            if len(documents) > final_n:
-                documents = self.reranker.rerank(
-                    question, documents, top_k=min(self.config.rerank_n, len(documents))
-                )
-            if len(documents) > final_n:
-                documents = self.relevance_filter.filter_relevant(
-                    question, documents, max_docs=final_n
-                )
+            if depth == "deep":
+                if sub_future is None:
+                    info["notes"].append(note("deep_unavailable"))
+                else:
+                    sq = sub_future.result()
+                    timings["subqueries"] = round(sq.seconds, 3)
+                    if sq.failed:
+                        info["notes"].append(note("depth_reduced"))
+                    else:
+                        info["depth_used"] = "deep"
+                        t1 = time.perf_counter()
+                        fq = [(q, pool.submit(self.sibils.plain_search, q, collection, n, taxa,
+                                              s.extra_search_timeout)) for q in sq.queries]
+                        fg = (pool.submit(self.sibils.plain_search, sq.guess_query, collection, n,
+                                          taxa, s.extra_search_timeout) if sq.guess_query else None)
+                        extra = [(q, [d for d in f.result() if self._is_prose(d)]) for q, f in fq]
+                        guess_docs = [d for d in fg.result() if self._is_prose(d)] if fg else None
+                        timings["extra_search"] = round(time.perf_counter() - t1, 3)
 
-        # Drop documents with no meaningful content (e.g. empty Plazi treatments)
-        # Also drop suppdata/pmc docs whose "abstract" is actually CSV/tabular data
-        # (bibliography spreadsheets score high on BM25 but BioBERT can't extract from them)
-        def _is_prose(doc) -> bool:
-            text = ((doc.title or '') + ' ' + (doc.abstract or ''))[:500]
-            if len(text.strip()) < 20:
-                return False
-            # CSV/tabular: high ratio of commas or tabs relative to letters
-            letters = sum(1 for c in text if c.isalpha())
-            commas = text.count(',') + text.count('\t')
-            if letters > 0 and commas / letters > 0.15:
-                return False
-            return True
+        base = [[d for d in lst if self._is_prose(d)] for lst in lists]
+        t2 = time.perf_counter()
+        sel = select(question, base, extra, guess_docs, self.reranker.score, final_n, s)
+        timings["rerank"] = round(time.perf_counter() - t2, 3)
+        timings["retrieval"] = round(time.perf_counter() - t0, 3)
+        info["queries_used"] = sel.kept_queries
+        info["dropped_queries"] = sel.dropped_queries
+        info["guess_docs_in"] = sel.guess_docs_in
+        info["scores"] = [round(x, 3) for x in sel.scores]
+        for d, logit in zip(sel.documents, sel.scores):
+            d.score = round(sigmoid(logit), 4)
+        return sel.documents, sel.n_candidates, info
 
-        documents = [d for d in documents if _is_prose(d)]
-
-        # Always cap to final_n — ensures BioBERT doesn't run on 30 docs when
-        # reranker and relevance filter are both disabled.
+    def _retrieve(self, question: str, collection: Optional[str], depth: str, final_n: int,
+                  candidates_n: Optional[int] = None, batch: bool = False):
+        """Like _retrieve_collection; with no collection, every configured collection is
+        searched and the best documents of all are kept (at most final_n // 2 from each
+        collection other than Medline, as before)."""
+        if collection is not None:
+            return self._retrieve_collection(question, collection, depth, final_n, candidates_n, batch)
+        cols = self.sibils.collection if isinstance(self.sibils.collection, list) else [self.sibils.collection]
+        results, errors = {}, []
+        with ThreadPoolExecutor(max_workers=len(cols)) as pool:
+            futures = {c: pool.submit(self._retrieve_collection, question, c, depth, final_n, candidates_n, batch)
+                       for c in cols}
+            for c, f in futures.items():
+                try:
+                    results[c] = f.result()
+                except Exception as e:
+                    errors.append(e)
+        if not results:
+            raise errors[0]
+        ranked = sorted((d for docs, _, _ in results.values() for d in docs),
+                        key=lambda d: d.score, reverse=True)
+        counts: Dict[str, int] = {}
+        documents = []
+        for d in ranked:
+            limit = final_n // 2 if d.source != 'medline' else final_n
+            if counts.get(d.source, 0) < limit:
+                documents.append(d)
+                counts[d.source] = counts.get(d.source, 0) + 1
         documents = documents[:final_n]
-
-        # Cap per-collection contribution ONLY when mixing multiple collections.
-        # When the caller already restricts to a specific collection, all retrieved
-        # docs are from that collection and the cap would incorrectly halve them.
-        if collection is None:
-            from collections import defaultdict
-            col_counts: dict = defaultdict(int)
-            capped = []
-            for d in documents:
-                src = getattr(d, 'source', 'unknown')
-                limit = final_n // 2 if src != 'medline' else final_n
-                if col_counts[src] < limit:
-                    capped.append(d)
-                    col_counts[src] += 1
-            documents = capped
-
-        for d in documents:
-            s = float(getattr(d, 'score', 0.0))
-            source = getattr(d, 'source', 'faiss')
-            if source == 'faiss' or s <= 1.0:
-                d.score = round(min(s, 1.0), 4)
-            else:
-                d.score = round(min(s / 200.0, 1.0), 4)
-
-        return documents, num_retrieved
+        infos = [info for _, _, info in results.values()]
+        notes, seen = [], set()
+        for i in infos:
+            for nt in i["notes"]:
+                if nt["code"] not in seen:
+                    seen.add(nt["code"])
+                    notes.append(nt)
+        info = {
+            "depth_used": "deep" if all(i["depth_used"] == "deep" for i in infos) else "fast",
+            "notes": notes,
+            "queries_used": next((i["queries_used"] for i in infos if i["queries_used"]), []),
+            "timings": {k: max(i["timings"].get(k, 0.0) for i in infos)
+                        for k in {k for i in infos for k in i["timings"]}},
+        }
+        return documents, sum(n for _, n, _ in results.values()), info
 
     @staticmethod
     def _is_garbage(text: str) -> bool:
@@ -434,14 +525,13 @@ class RAGPipeline:
         ).search(text)
         if m:
             text = text[:m.start()].strip()
-        clean_text = re.sub(r'\[\d+(?:\s*,\s*\d+)*\]', '', text).strip()
+        clean_text = _MARKER_RUN.sub("", text).strip()
         if self._is_garbage(clean_text):
             return []
         passages = self._passages(question, documents)
-        # Parse cited [N] indices to surface all referenced documents.
-        # If none cited, fall back to top document.
+        # Every document cited, in [N] or [N, M], is surfaced; none cited, the top one.
         cited_indices = sorted(set(
-            int(n) for n in re.findall(r'\[(\d+)\]', text)
+            int(n) for marker in re.findall(_MARKER, text) for n in re.findall(r"\d+", marker)
             if int(n) < len(documents)
         ))
         if not cited_indices:
@@ -484,7 +574,7 @@ class RAGPipeline:
             "answer_score": round(cand["score"], 4),
             "docs": [{
                 "docid": self._format_docid(doc),
-                "doc_source": getattr(doc, 'source', 'faiss'),
+                "doc_source": getattr(doc, 'source', 'sibils'),
                 "doc_retrieval_score": round(float(getattr(doc, 'score', 0.0)), 3),
                 "doc_text": snippet,
                 "snippet_start": s - window_start,
@@ -524,6 +614,49 @@ class RAGPipeline:
             'transformed_query': None,
         }
 
+    # ------------------------------------------------------------------
+    # Readers
+    # ------------------------------------------------------------------
+
+    def _extractive_answers(self, question: str, documents: List, limit: Optional[int] = None) -> List[Dict]:
+        candidates = self.extractor.extract(question, documents, self.config.max_abstract_length)
+        if limit:
+            candidates = candidates[:limit]
+        return [self._build_answer_from_candidate(c, documents) for c in candidates]
+
+    def _read(self, question: str, documents: List, mode: str, notes: List[Dict],
+              extractive_limit: Optional[int] = None, debug_info: Optional[Dict] = None,
+              batch: bool = False):
+        """Answers from the documents, and the mode that wrote them.
+
+        A generative answer the language model cannot give in time (no first word in
+        llm_first_token_timeout seconds, server busy or down) becomes the extractive
+        answer, with a note saying so: the person still gets an answer at once.
+        """
+        if mode == "extractive":
+            return self._extractive_answers(question, documents, extractive_limit), "extractive"
+        t0 = time.perf_counter()
+        try:
+            raw_text = self._generate(self._build_messages(question, documents), batch=batch)
+        except LLMUnavailable as e:
+            if batch:
+                # A batch job gets the generated answer or an error, never BioBERT's span in
+                # its place: a script reading the answer cannot tell the two apart.
+                raise
+            logger.warning("language model unavailable (%s): sending the extractive answer", e.reason)
+            notes.append(note("extractive_fallback"))
+            if debug_info is not None:
+                debug_info['generation_error'] = str(e)
+            return self._extractive_answers(question, documents, extractive_limit), "extractive"
+        if debug_info is not None:
+            debug_info['raw_generated_text'] = str(raw_text)
+            debug_info['generation_time'] = round(time.perf_counter() - t0, 3)
+        return self._answers_from_generation(question, raw_text, documents, "generative"), "generative"
+
+    # ------------------------------------------------------------------
+    # Entry points
+    # ------------------------------------------------------------------
+
     def run_batch(
         self,
         questions: List[str],
@@ -531,21 +664,18 @@ class RAGPipeline:
         final_n: Optional[int] = None,
         collection: Optional[str] = None,
     ) -> List[Dict]:
-        """Run extractive QA on multiple questions with parallel retrieval.
+        """Run extractive QA on multiple questions, searching for all of them at once.
 
-        Retrieval (SIBILS HTTP + FAISS + reranking) runs concurrently across
-        all questions — I/O-bound, thread-safe.  Results are returned in the
-        same order as the input list.
+        Searches run concurrently across questions at the fast depth. Results are
+        returned in the same order as the input list.
         """
-        from concurrent.futures import ThreadPoolExecutor
         start_time = time.time()
-        retrieval_n = retrieval_n or self.config.retrieval_n
         final_n = final_n or self.config.final_n
 
         # ── 1. Parallel retrieval ──────────────────────────────────────────
         with ThreadPoolExecutor(max_workers=min(len(questions), 8)) as pool:
             retrieval_results = list(pool.map(
-                lambda q: self._retrieve_and_prepare(q, retrieval_n, final_n, collection),
+                lambda q: self._retrieve(q, collection, "fast", final_n, retrieval_n)[:2],
                 questions,
             ))
 
@@ -566,7 +696,7 @@ class RAGPipeline:
                         "answer_score": round(cand["score"], 4),
                         "docs": [{
                             "docid": self._format_docid(doc),
-                            "doc_source": getattr(doc, 'source', 'faiss'),
+                            "doc_source": getattr(doc, 'source', 'sibils'),
                             "doc_retrieval_score": round(float(getattr(doc, 'score', 0.0)), 3),
                             "doc_text": cand["passage"],
                             "snippet_start": cand["span_start"],
@@ -575,7 +705,7 @@ class RAGPipeline:
                     })
             responses.append(self._build_response(
                 question, answers, documents, num_retrieved,
-                retrieval_n, collection, "extractive", time.time() - start_time,
+                final_n, collection, "extractive", time.time() - start_time,
             ))
 
         return responses
@@ -586,94 +716,73 @@ class RAGPipeline:
         retrieval_n: Optional[int] = None,
         final_n: Optional[int] = None,
         mode: str = "generative",
-        retrieval: str = "sparse",
+        retrieval: Optional[str] = None,
         debug: bool = False,
+        depth: Optional[str] = None,
+        batch: bool = False,
     ) -> Dict:
         """
-        Retrieve independently per collection (medline, plazi, pmc), then generate answers.
+        Search each collection (medline, plazi, pmc) at the depth asked, then answer per collection.
 
-        Each collection gets its own retrieval pass with final_n document slots.
-        Returns a dict with `collection_results` ordered best-first.
+        Each collection gets its own search with final_n document slots; the deep mode's
+        model-written searches are written once and used by all three. `retrieval` is
+        accepted for older clients and ignored. Returns a dict with `collection_results`
+        ordered best-first.
         """
-        from concurrent.futures import ThreadPoolExecutor
         start_time = time.time()
-        retrieval_n = retrieval_n or self.config.retrieval_n
+        depth = self.resolve_depth(depth)
         final_n = final_n or self.config.final_n
-
         qa_collections = ["medline", "plazi", "pmc"]
 
-        # ── 1. All retrievals in parallel (IO-bound: safe to thread) ─────
+        # ── 1. All searches in parallel ────────────────────────────────────
+        found, errors = {}, []
         with ThreadPoolExecutor(max_workers=3) as pool:
-            qa_futures = {
-                col: pool.submit(self._retrieve_and_prepare, question, retrieval_n, final_n, col, retrieval)
-                for col in qa_collections
-            }
-            qa_docs = {col: fut.result() for col, fut in qa_futures.items()}
+            futures = {col: pool.submit(self._retrieve_collection, question, col, depth, final_n,
+                                        retrieval_n, batch)
+                       for col in qa_collections}
+            for col, fut in futures.items():
+                try:
+                    found[col] = fut.result()
+                except Exception as e:
+                    logger.warning("search failed for %s: %s", col, e)
+                    errors.append(e)
+        if not found and errors:
+            raise errors[0]
+        total_retrieved = sum(n for _, n, _ in found.values())
 
-        total_retrieved = sum(n for _, n in qa_docs.values())
-
-        # ── 2. Rank QA collections by their best-scoring document ─────────
+        # ── 2. Collections in the order of their best document ─────────────
+        # Reranker scores are comparable across collections: same question, same model.
         ranked_qa = sorted(
-            [(col, docs) for col, (docs, _) in qa_docs.items() if docs],
-            key=lambda kv: float(getattr(kv[1][0], 'score', 0.0)) if kv[1] else 0.0,
+            [(col, docs, info) for col, (docs, _, info) in found.items() if docs],
+            key=lambda item: float(getattr(item[1][0], 'score', 0.0)),
             reverse=True,
         )
 
-        # ── 3a. BioBERT extraction — parallel across all collections ───────
-        # BioBERT is CPU-bound and independent per collection; run in parallel.
-        # Generation must remain sequential (single GPU lock).
-        def _run_biobert(col_name, col_docs):
-            if mode != "extractive":
-                return col_name, [], {}, mode
-            candidates = self.extractor.extract(question, col_docs, self.config.max_abstract_length)
-            col_debug = {}
+        # ── 3. Read each collection's documents ───────────────────────────
+        # In parallel: the shared server takes several requests at once, BioBERT runs on
+        # the CPU, and an in-process model serialises its calls with its own lock.
+        def read_one(item):
+            col, docs, info = item
+            notes = list(info["notes"])
+            col_debug = {} if debug else None
+            answers, mode_used = self._read(question, docs, mode, notes, extractive_limit=3,
+                                            debug_info=col_debug, batch=batch)
+            entry = {"collection": col, "answers": answers, "mode_used": mode_used,
+                     "depth_used": info["depth_used"], "notes": notes,
+                     "queries_used": info["queries_used"]}
             if debug:
-                col_debug['biobert_scores'] = [
-                    {"score": float(round(c["score"], 4)), "text": c["text"][:80]}
-                    for c in candidates[:5]
-                ]
-            if candidates:
-                answers = [self._build_answer_from_candidate(c, col_docs) for c in candidates[:3]]
-                return col_name, answers, col_debug, "extractive"
-            return col_name, [], col_debug, mode
+                col_debug.update({k: info[k] for k in ("timings", "dropped_queries", "guess_docs_in", "scores")
+                                  if k in info})
+                entry['debug_info'] = col_debug
+            return entry
 
         with ThreadPoolExecutor(max_workers=3) as pool:
-            biobert_futures = {
-                col: pool.submit(_run_biobert, col, docs)
-                for col, docs in ranked_qa
-            }
-            biobert_results = {col: fut.result() for col, fut in biobert_futures.items()}
-
-        # ── 3b. Generation — sequential (GPU lock) ────────────────────────
-        qa_results = []
-        final_mode_used = mode
-
-        for col_name, col_docs in ranked_qa:
-            _, answers, col_debug, mode_used = biobert_results[col_name]
-
-            if mode == "generative":
-                raw_text = (
-                    self._generate_vllm(self._build_messages(question, col_docs))
-                    if self.config.use_vllm
-                    else self._generate_cpu(self._build_messages(question, col_docs))
-                )
-                if debug:
-                    col_debug['raw_generated_text'] = raw_text
-                answers = self._answers_from_generation(question, raw_text, col_docs, mode_used)
-                mode_used = "generative"
-
-            if not qa_results:
-                final_mode_used = mode_used
-
-            entry = {"collection": col_name, "answers": answers, "mode_used": mode_used}
-            if debug:
-                entry['debug_info'] = col_debug
-            qa_results.append(entry)
+            qa_results = list(pool.map(read_one, ranked_qa))
+        final_mode_used = qa_results[0]["mode_used"] if qa_results else ("extractive" if mode == "extractive" else "generative")
 
         # ── 4. Rank collections by their answers ──────────────────────────
-        # Retrieval scores are not comparable across collections, and a collection
-        # whose answer is "the sources do not state it" should not be listed above
-        # one that answers (D10.3 P2). Retrieval order breaks the remaining ties.
+        # A collection whose answer is "the sources do not state it" should not be listed
+        # above one that answers (D10.3 P2). The best document's score breaks the ties.
         collection_results = rank_collection_results(question, qa_results, use_scores=False)
 
         return {
@@ -681,8 +790,11 @@ class RAGPipeline:
             "collection_results": collection_results,
             "mode_used": final_mode_used,
             "ndocs_retrieved": total_retrieved,
-            "model": self._model_label(final_mode_used, self.config.model_name),
+            "model": self._model_label(final_mode_used, self.config.generator_label),
             "pipeline_time": round(time.time() - start_time, 3),
+            "_timings": {col: info["timings"] for col, (_, _, info) in found.items()},
+            "_notes": sorted({n["code"] for r in qa_results for n in r["notes"]}),
+            "_depth_used": sorted({r["depth_used"] for r in qa_results}),
         }
 
     def run(
@@ -694,84 +806,50 @@ class RAGPipeline:
         return_documents: bool = False,
         debug: bool = False,
         mode: str = "generative",
-        retrieval: str = "sparse",
+        retrieval: Optional[str] = None,
+        depth: Optional[str] = None,
+        batch: bool = False,
     ) -> Dict:
         """
-        Run the RAG pipeline.
+        Run the RAG pipeline on one collection (or on all configured ones, merged).
 
         Args:
             question: User question
-            retrieval_n: Override retrieval count
-            final_n: Override final document count
-            collection: Override SIBILS collection ("medline", "plazi", etc.).
-                        If None, uses default (medline + plazi).
+            retrieval_n: Documents per search (default: config); the lists are merged and reranked
+            final_n: Documents the reader gets (default: config, 5)
+            collection: "medline", "plazi" or "pmc"; None searches every configured collection
             return_documents: Include documents in response
             debug: Include debug information
-            mode: Answer strategy — "extractive" (BioBERT span) or "generative" (LLM)
-            retrieval: Retrieval strategy — "sparse" (BM25 only) or "dense" (FAISS + BM25 + reranker)
+            mode: "extractive" (BioBERT span) or "generative" (language model)
+            retrieval: ignored; accepted for older clients ("sparse", "dense")
+            depth: "fast" or "deep" (default: config)
 
         Returns:
-            Response dict with answer and metadata
+            Response dict with answers and metadata
         """
         start_time = time.time()
-        retrieval_n = retrieval_n or self.config.retrieval_n
+        depth = self.resolve_depth(depth)
         final_n = final_n or self.config.final_n
-
         debug_info = {} if debug else None
 
-        # Steps 1-4: retrieval → reranking → filtering → score normalization
-        t0 = time.time()
-        documents, num_retrieved = self._retrieve_and_prepare(
-            question, retrieval_n, final_n, collection, retrieval
-        )
+        documents, num_retrieved, info = self._retrieve(question, collection, depth, final_n, retrieval_n, batch)
+        notes = info["notes"]
         if debug:
-            debug_info['retrieval_time'] = round(time.time() - t0, 3)
+            debug_info['retrieval_time'] = info["timings"].get("retrieval")
+            debug_info['timings'] = info["timings"]
             debug_info['initial_count'] = num_retrieved
             debug_info['final_count'] = len(documents)
+            for k in ("dropped_queries", "guess_docs_in", "scores"):
+                if k in info:
+                    debug_info[k] = info[k]
 
-        if not documents:
-            return {
-                'sibils_version': PIPELINE_VERSION,
-                'success': True,
-                'error': '',
-                'question': question,
-                'collection': collection or self._default_collection_str,
-                'model': self._model_label(mode, self.config.model_name),
-                'ndocs_requested': retrieval_n,
-                'ndocs_returned_by_SIBiLS': 0,
-                'answers': [],
-                'mode_used': mode,
-                'pipeline_time': round(time.time() - start_time, 3),
-                'transformed_query': None,
-            }
-
-        # Step 5: Generate or extract answer
-        t0 = time.time()
-        mode_used = mode
-        answers = []
-
-        if mode == "extractive":
-            candidates = self.extractor.extract(
-                question, documents, self.config.max_abstract_length
-            )
-            if debug:
-                debug_info['biobert_scores'] = [
-                    {"score": float(round(c["score"], 4)), "text": c["text"][:80], "source": getattr(documents[c["doc_idx"]], "source", "?")}
-                    for c in candidates[:10]
-                ]
-            for cand in candidates:
-                answers.append(self._build_answer_from_candidate(cand, documents))
-
-        if mode == "generative":
-            raw_text = self._generate_vllm(self._build_messages(question, documents)) \
-                if self.config.use_vllm \
-                else self._generate_cpu(self._build_messages(question, documents))
-            answers = self._answers_from_generation(question, raw_text, documents, mode_used)
-            if debug:
-                debug_info['raw_generated_text'] = raw_text
-
-        if debug:
-            debug_info['generation_time'] = round(time.time() - t0, 3)
+        answers: List[Dict] = []
+        mode_used = "extractive" if mode == "extractive" else "generative"
+        if documents:
+            t0 = time.perf_counter()
+            answers, mode_used = self._read(question, documents, mode, notes, debug_info=debug_info,
+                                            batch=batch)
+            info["timings"]["read"] = round(time.perf_counter() - t0, 3)
 
         response = {
             'sibils_version': PIPELINE_VERSION,
@@ -779,13 +857,17 @@ class RAGPipeline:
             'error': '',
             'question': question,
             'collection': collection or self._default_collection_str,
-            'model': self._model_label(mode_used, self.config.model_name),
-            'ndocs_requested': retrieval_n,
+            'model': self._model_label(mode_used, self.config.generator_label),
+            'ndocs_requested': final_n,
             'ndocs_returned_by_SIBiLS': num_retrieved,
             'answers': answers,
             'mode_used': mode_used,
+            'depth_used': info["depth_used"],
+            'notes': notes,
+            'queries_used': info["queries_used"],
             'pipeline_time': round(time.time() - start_time, 3),
             'transformed_query': None,
+            '_timings': info["timings"],
         }
 
         if debug:
@@ -795,7 +877,7 @@ class RAGPipeline:
             response['documents'] = [
                 {
                     'docid': self._format_docid(doc),
-                    'source': getattr(doc, 'source', 'faiss'),
+                    'source': getattr(doc, 'source', 'sibils'),
                     'title': doc.title,
                     'abstract': doc.abstract,
                     'pmid': getattr(doc, 'pmid', None),
@@ -811,6 +893,7 @@ class RAGPipeline:
         question: str,
         contexts: List[str],
         mode: str = "extractive",
+        batch: bool = False,
     ) -> Dict:
         """
         Run QA on provided context strings, bypassing retrieval entirely.
@@ -827,26 +910,14 @@ class RAGPipeline:
         ]
 
         start_time = time.time()
-        answers = []
-
-        if mode == "extractive":
-            candidates = self.extractor.extract(question, docs, self.config.max_abstract_length)
-            for cand in candidates:
-                answers.append(self._build_answer_from_candidate(cand, docs))
-
-        elif mode == "generative":
-            messages = self._build_messages(question, docs)
-            raw_text = (
-                self._generate_vllm(messages)
-                if self.config.use_vllm
-                else self._generate_cpu(messages)
-            )
-            answers = self._answers_from_generation(question, raw_text, docs, mode)
+        notes: List[Dict] = []
+        answers, mode_used = self._read(question, docs, mode, notes, batch=batch)
 
         return {
             "question": question,
             "answers": answers,
-            "mode_used": mode,
+            "mode_used": mode_used,
+            "notes": notes,
             "pipeline_time": round(time.time() - start_time, 3),
         }
 
@@ -857,6 +928,7 @@ class RAGPipeline:
         mode: str = "generative",
         return_documents: bool = False,
         debug: bool = False,
+        batch: bool = False,
     ) -> Dict:
         """
         Run QA on pre-fetched Document objects, bypassing retrieval entirely.
@@ -866,33 +938,23 @@ class RAGPipeline:
         correct doc_source, docid, and full-text IDF passage selection.
         """
         start_time = time.time()
-        answers: List[Dict] = []
-
-        if mode == "extractive":
-            candidates = self.extractor.extract(question, documents, self.config.max_abstract_length)
-            for cand in candidates:
-                answers.append(self._build_answer_from_candidate(cand, documents))
-
-        elif mode == "generative":
-            messages = self._build_messages(question, documents)
-            raw_text = (
-                self._generate_vllm(messages)
-                if self.config.use_vllm
-                else self._generate_cpu(messages)
-            )
-            answers = self._answers_from_generation(question, raw_text, documents, mode)
+        notes: List[Dict] = []
+        answers, mode_used = self._read(question, documents, mode, notes, batch=batch)
 
         result: Dict = {
-            "sibils_version": "biomoqa-2.0",
+            "sibils_version": PIPELINE_VERSION,
             "success": True,
             "error": "",
             "question": question,
             "collection": "+".join(sorted({d.source for d in documents})),
-            "model": "biobert" if mode == "extractive" else self.config.model_name.split("/")[-1],
+            "model": self._model_label(mode_used, self.config.generator_label),
             "ndocs_requested": len(documents),
             "ndocs_returned_by_SIBiLS": len(documents),
             "answers": answers,
-            "mode_used": mode,
+            "mode_used": mode_used,
+            "depth_used": None,
+            "notes": notes,
+            "queries_used": [],
             "pipeline_time": round(time.time() - start_time, 3),
             "transformed_query": None,
             "debug_info": {"doc_ids": [d.doc_id for d in documents]} if debug else None,
@@ -925,12 +987,47 @@ class RAGPipeline:
         return best_passage(text, question, window)
 
     def _passages(self, question: str, documents: List) -> List[str]:
-        """The passage of each document the generative model is given, cleaned."""
-        llm_limit = self.config.llm_abstract_length
-        return [
-            self._clean_for_llm(self._best_passage(doc.full_text or doc.abstract or '', question, llm_limit))
-            for doc in documents
-        ]
+        """The passage of each document the language model is given, cleaned.
+
+        A document of up to llm_whole_upto characters is given whole: cutting abstracts
+        removed the answer text for 5 of the 258 test questions. A longer one (a PMC full
+        text, a long treatment) gives its best llm_abstract_length window.
+        """
+        out = []
+        for doc in documents:
+            text = doc.full_text or doc.abstract or ''
+            if len(text) > self.config.llm_whole_upto:
+                text = self._best_passage(text, question, self.config.llm_abstract_length)
+            out.append(self._clean_for_llm(text))
+        return out
+
+    def _generate(self, messages: List[dict], batch: bool = False) -> str:
+        """The answer text, from the backend the configuration names.
+        Raises LLMUnavailable when the shared server does not answer in time."""
+        if self.remote is not None:
+            return self._generate_remote(messages, batch)
+        if self.config.use_vllm:
+            return self._generate_vllm(messages)
+        return self._generate_cpu(messages)
+
+    def _generate_remote(self, messages: List[dict], batch: bool = False) -> str:
+        """One answer from the shared server, with the settings the reader was tested with:
+        no repetition penalty (at 1.15 the 27B answered "not stated" on passages that hold
+        the value), at most max_tokens tokens, no thinking. A blank answer is asked for
+        once more, with another seed."""
+        kwargs = dict(
+            max_tokens=self.config.max_tokens, temperature=self.config.temperature,
+            top_p=0.9, top_k=0, repetition_penalty=1.0, presence_penalty=0.0,
+            stop=ANSWER_STOP, prefix=ANSWER_PREFIX, logprobs=True,
+        )
+        if batch:   # behind people's requests on the shared server, and allowed to wait
+            kwargs.update(priority=self.config.llm_batch_priority,
+                          first_token_timeout=self.config.llm_batch_first_token_timeout,
+                          total_timeout=self.config.llm_batch_total_timeout)
+        comp = self.remote.chat(messages, seed=0, **kwargs)
+        if not comp.text.strip():
+            comp = self.remote.chat(messages, seed=1, **kwargs)
+        return GeneratedText(ANSWER_PREFIX + comp.text.strip(), mean_token_probability(comp.logprobs))
 
     def _build_messages(self, question: str, documents: List) -> List[dict]:
         """Build chat messages for the LLM from question and retrieved documents.

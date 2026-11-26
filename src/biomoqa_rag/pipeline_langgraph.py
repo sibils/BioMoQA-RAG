@@ -38,7 +38,7 @@ class RAGState(TypedDict):
     final_n:          int
     collection:       Optional[str]
     mode:             str    # "extractive" | "generative"
-    retrieval:        str    # "sparse" | "dense"
+    retrieval:        str    # accepted and ignored, as in the service
     return_documents: bool
     debug:            bool
     start_time:       float
@@ -93,12 +93,12 @@ class LangGraphRAGPipeline(RAGPipeline):
 
     def _node_retrieve(self, state: RAGState) -> dict:
         t0 = time.time()
-        documents, num_retrieved = self._retrieve_and_prepare(
+        documents, num_retrieved, _ = self._retrieve(
             state["question"],
-            state["retrieval_n"],
-            state["final_n"],
             state["collection"],
-            state["retrieval"],
+            self.resolve_depth(None),   # the service's default depth; `retrieval` is ignored
+            state["final_n"],
+            state["retrieval_n"],
         )
         update: dict = {"documents": documents, "num_retrieved": num_retrieved}
         if state["debug"]:
@@ -135,11 +135,7 @@ class LangGraphRAGPipeline(RAGPipeline):
         t0 = time.time()
         documents = state["documents"]
         messages = self._build_messages(state["question"], documents)
-        raw_text = (
-            self._generate_vllm(messages)
-            if self.config.use_vllm
-            else self._generate_cpu(messages)
-        )
+        raw_text = self._generate(messages)   # the configured backend: shared server, vLLM or CPU
         answers = self._answers_from_generation(
             state["question"], raw_text, documents, state["mode"]
         )
@@ -220,7 +216,7 @@ class LangGraphRAGPipeline(RAGPipeline):
             response["documents"] = [
                 {
                     "docid":    self._format_docid(doc),
-                    "source":   getattr(doc, "source", "faiss"),
+                    "source":   getattr(doc, "source", "sibils"),
                     "title":    doc.title,
                     "abstract": doc.abstract,
                     "pmid":     getattr(doc, "pmid", None),

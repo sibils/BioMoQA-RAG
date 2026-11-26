@@ -35,16 +35,45 @@ class ModelConfig(BaseModel):
 
 
 class GenerationConfig(BaseModel):
-    max_tokens: int = 384
-    temperature: float = 0.1
+    # "remote": the shared language-model server ([llm]); "vllm": the [model] loaded in
+    # this process on the GPU; "cpu": a small model on the CPU (model.size).
+    backend: str = "remote"
+    max_tokens: int = 300
+    temperature: float = 0.2
+
+
+class LLMConfig(BaseModel):
+    """The shared language-model server (OpenAI-compatible; LAN only, no key)."""
+    base_url: str = "http://llm.lan.text-analytics.ch/qwen/v1"
+    model: str = "Qwen3.8-27B"
+    # No first token in this time: the extractive answer is sent instead, with a note.
+    first_token_timeout: float = 4.0
+    total_timeout: float = 20.0
+    priority: int = -10  # interactive; batch jobs on the same server send a positive value
+    # Batch jobs (a POST that does not come from a web browser, such as the trait pipeline):
+    # served after people, allowed to wait, and an error rather than BioBERT's answer.
+    batch_priority: int = 10
+    batch_first_token_timeout: float = 60.0
+    batch_total_timeout: float = 100.0
+
+
+class DepthConfig(BaseModel):
+    """Search depth (see depth.py). Requests choose with `depth`; this is the default."""
+    default: str = "fast"
+    candidates_per_search: int = 20
+    subquery_timeout: float = 3.0
+    extra_search_timeout: float = 1.0
+    min_agreement: float = 0.8
+    max_new_words: int = 5
+    guess_query: bool = True
+    guess_margin: float = 1.0
+    batch_subquery_timeout: float = 30.0
 
 
 class RetrievalConfig(BaseModel):
-    retrieval_n: int = 15
-    use_smart_retrieval: bool = True
-    hybrid_alpha: float = 0.5
-    # Dense retriever encoder, used by the hybrid (generative) path.
-    dense_model: str = "pritamdeka/S-PubMedBert-MS-MARCO"
+    # Not used since the depth search ([depth] candidates_per_search); kept so that
+    # older config files still load.
+    retrieval_n: int = 20
 
 
 class SibilsConfig(BaseModel):
@@ -59,27 +88,21 @@ class SibilsConfig(BaseModel):
 
 
 class RerankingConfig(BaseModel):
-    enabled: bool = True
-    model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    top_k: int = 15
+    # Every candidate is scored against the question as asked; the best final_n are read.
+    model: str = "cross-encoder/ms-marco-MiniLM-L-12-v2"
+    device: str = "cpu"
 
 
 class RelevanceFilterConfig(BaseModel):
-    enabled: bool = True
-    min_overlap: float = 0.15
-    final_n: int = 5
-    min_extractive_score: float = 0.20
+    final_n: int = 5                     # documents the reader gets
+    min_extractive_score: float = 0.20   # POST /batch drops extractive answers below this
 
 
 class ContextConfig(BaseModel):
     max_abstract_length: int = 800
-    llm_abstract_length: int = 600
+    llm_abstract_length: int = 600   # window the language model gets from a long document
+    llm_whole_upto: int = 2500       # documents up to this length are given whole
     truncate_abstracts: bool = True
-
-
-class DataConfig(BaseModel):
-    faiss_index: str = "data/faiss_index.bin"
-    documents: str = "data/documents.pkl"
 
 
 class ExtractionConfig(BaseModel):
@@ -92,12 +115,13 @@ class Config(BaseModel):
     server: ServerConfig = ServerConfig()
     model: ModelConfig = ModelConfig()
     generation: GenerationConfig = GenerationConfig()
+    llm: LLMConfig = LLMConfig()
+    depth: DepthConfig = DepthConfig()
     retrieval: RetrievalConfig = RetrievalConfig()
     sibils: SibilsConfig = SibilsConfig()
     reranking: RerankingConfig = RerankingConfig()
     relevance_filter: RelevanceFilterConfig = RelevanceFilterConfig()
     context: ContextConfig = ContextConfig()
-    data: DataConfig = DataConfig()
     extraction: ExtractionConfig = ExtractionConfig()
 
 
@@ -126,16 +150,14 @@ def required_models(config: Optional[Config] = None) -> List[str]:
     a model changed in config.toml is downloaded on the next deploy without anyone
     having to remember a second place to edit.
 
-    The reranker is included whether or not reranking is enabled, because the
-    pipeline loads it at construction time regardless, and an unused 1 GB download
-    is cheaper than a failed deploy.
+    The generative model is included only when this process loads it (backend
+    "vllm" or "cpu"); with the shared server it is not needed here.
     """
     cfg = config or get_config()
     models = [
-        cfg.model.model_name,
+        cfg.model.model_name if cfg.generation.backend != "remote" else None,
         cfg.reranking.model,
         cfg.extraction.model,
-        cfg.retrieval.dense_model,
     ]
     return list(dict.fromkeys(m for m in models if m))
 
